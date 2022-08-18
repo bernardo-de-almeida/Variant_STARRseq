@@ -1,0 +1,1608 @@
+---
+title: "Human motif pasting STARR-seq analysis"
+author: "Bernardo Almeida"
+date: '2022-08-17'
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+    toc_depth: 4  # upto three depths of headings (specified by #, ## and ###)
+    theme: spacelab
+    highlight: tango
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
+                      dev="CairoPNG")
+
+setwd("/groups/stark/almeida/Papers/Random_variant_motif_context_STARRseq/Code/Variant_STARRseq/Human_motif_pasting_STARRseq/")
+
+```
+
+# Script to reproduce analyses of human motif pasting STARR-seq
+
+Required packages
+
+```{r packages, warning=FALSE, message=FALSE}
+
+require(tidyverse)
+require(data.table)
+require(BSgenome.Hsapiens.UCSC.hg19)
+require(seqinr)
+require(stringr)
+require(GenomicRanges)
+require(patchwork)
+require(ggpointdensity)
+require(gridExtra)
+require(cowplot)
+require(ggrepel)
+require(Biostrings)
+require(ggplot2)
+
+### Motif colours
+motif_colours <- c("4 controls"="grey60",
+                   "neg_ctrl_AAGTTT"="grey60",
+                   "neg_ctrl_ATTAGT"="grey60",
+                   "neg_ctrl_ATAAG"="grey60",
+                   "neg_ctrl_AGTTG"="grey60",
+                   "ctrl_AAGTTT"="grey60",
+                   "ctrl_ATTAGT"="grey60",
+                   "ctrl_ATAAG"="grey60",
+                   "ctrl_AGTTG"="grey60",
+                   "AP1"="#BA3979",
+                   "AP-1"="#BA3979",
+                   "CREB1"="#377EB8",
+                   "MAF"="#FF7F00", # 984EA3
+                   "MECP2"="#984EA3", # E41A1C
+                   "P53"="#4DAF4A",
+                   "Ebox/MYC"="#FFFF33",
+                   "EGR1"=rgb(255,102,102, maxColorValue = 255), #"#A65628"
+                   "ETS"="#a6761d", # "#FF7F00"
+                   "E2F1"="#F781BF",
+                   "Random"="grey60",
+                   "shuffle"="grey60")
+
+```
+
+```{r function to get non-redundant motif positions}
+
+require(plyranges)
+
+# reduce motifs but keep scores
+my_reduce_with_score <- function(gr0, min.frac.ov=0.7){
+  # Overlaps that achieve required overlap
+  hits <- findOverlaps(gr0, ignore.strand=T, minoverlap = ceiling(unique(width(gr0))*min.frac.ov))
+  # remove self hits
+  hits <- hits[queryHits(hits)!=subjectHits(hits)]
+  
+  ### Do reduce just between the respective overlaps
+  if(length(c(queryHits(hits), subjectHits(hits)))>0){
+    gr_red <- reduce_ranges(gr0[unique(c(queryHits(hits), subjectHits(hits)))], max_score = max(score), sum_score = sum(score), Number_overlapping=n())
+    strand(gr_red) <- "+"
+    gr_no_ov <- gr0[-unique(c(queryHits(hits), subjectHits(hits)))]
+    if(length(gr_no_ov) > 0){
+      mcols(gr_no_ov) <- data.frame(max_score=gr_no_ov$score,
+                                    sum_score=gr_no_ov$score,
+                                    Number_overlapping=1)
+    }else{mcols(gr_no_ov) <- NULL}
+    
+    return(c(gr_no_ov, gr_red))
+  }else{
+    gr_no_ov <- gr0
+    mcols(gr_no_ov) <- data.frame(max_score=gr_no_ov$score,
+                                  sum_score=gr_no_ov$score,
+                                  Number_overlapping=1)
+    return(gr_no_ov)
+  }
+}
+
+### function to merge/reduce motif instances based on minimum motif overlap - but here I don't keep the score
+my_reduce <- function(gr0, min.frac.ov=0.7){
+  # Overlaps that achieve required overlap
+  hits <- findOverlaps(gr0, ignore.strand=T, minoverlap = ceiling(unique(width(gr0))*min.frac.ov))
+  # remove self hits
+  hits <- hits[queryHits(hits)!=subjectHits(hits)]
+  
+  ### Do reduce just between the respective overlaps
+  hits <- hits[queryHits(hits)<subjectHits(hits)]
+  
+  # remove queryhits (q) that are the subjecthits of other (inst1), and for whose its subjecthit is also a subjecthit of inst1
+  # this is important for MAFK instances in sequence chr15_60699706_60699954 - where two instances in opposite strands (palindrome) overlap another instance
+  q <- queryHits(hits)[queryHits(hits) %in% subjectHits(hits)]
+  q <- q[subjectHits(hits)[queryHits(hits) %in% q] %in% subjectHits(hits)[!queryHits(hits) %in% q]]
+  hits <- hits[!queryHits(hits) %in% q]
+  
+  # Reduce the ranges in 'gr0' that are connected via one or more hits in 'hits'. - and merge with the other ranges
+  # reduce per overlapping ranges
+  # is a bit slow because of the lapply per overlap
+  if(length(c(queryHits(hits), subjectHits(hits)))>0){
+    gr1 <- do.call("c", lapply(unique(queryHits(hits)), function(i){
+      hits_tmp <- hits[queryHits(hits)==i]
+      return(reduce(gr0[unique(c(queryHits(hits_tmp), subjectHits(hits_tmp)))], ignore.strand=T, min.gapwidth=0))
+    }))
+    out <- c(gr0[-c(queryHits(hits), subjectHits(hits))], gr1)
+    out <- unique(out) # if there is overlap between 3 ranges, it will do it twice and I need to unique it
+  }else{out <- gr0}
+  return(out)
+}
+
+```
+
+## Load sequencing reads from bowtie
+
+```{r load UMI STARR-seq and input reads, eval=FALSE}
+
+Twistmix_HCT116_20220113_oligo_info <- read.delim("data/Twistmix_20220113_oligo_info_paper.txt", stringsAsFactors = F)
+
+# experiment tables
+experiment_table <- read.delim("data/experiment.txt")
+experiment_table$simple_name <- gsub("LibFR012_LibFR015_humantwistmix_", "", experiment_table$Outfile)
+
+type="UMI"
+for(i in experiment_table$simple_name){
+  
+  mapped <- import.bed(paste0("data/", experiment_table$Outfile[experiment_table$simple_name %in% i], ".", type, ".bed"))
+  
+  # choose sequences with correct length and strand (mapped with no reverse strand)
+  mapped_correct_length <- mapped[width(mapped)==249 & mapped@strand %in% "+"]
+  
+  # add counts info to Twistmix_HCT116_20220113_oligo_info table
+  Twistmix_HCT116_20220113_oligo_info <- merge(Twistmix_HCT116_20220113_oligo_info, as.data.frame(table(mapped_correct_length@seqnames)), by=1, all.x=T)
+  names(Twistmix_HCT116_20220113_oligo_info)[ncol(Twistmix_HCT116_20220113_oligo_info)] <- paste0(i, "_", type)
+  
+  print(paste0(i, "_", type))
+  
+}
+
+# correct NAs to 0 counts
+Twistmix_HCT116_20220113_oligo_info[16:ncol(Twistmix_HCT116_20220113_oligo_info)][is.na(Twistmix_HCT116_20220113_oligo_info[16:ncol(Twistmix_HCT116_20220113_oligo_info)])] <- 0
+
+write.table(Twistmix_HCT116_20220113_oligo_info, paste0("Oligo_counts.txt"), sep="\t", quote=F, row.names = F)
+
+```
+## Compare replicates
+
+### Fig S17A - Replicates scatter plots
+
+```{r Compare replicates, results=FALSE, fig.width = 15, fig.height = 4.5}
+
+Twistmix_HCT116_20220113_oligo_info <- read.delim("Oligo_counts.txt")
+
+f="UMI"
+
+plot_list_tmp = list()
+
+Oligo_counts <- Twistmix_HCT116_20220113_oligo_info[,grep("rep._UMI", names(Twistmix_HCT116_20220113_oligo_info))]
+
+# normalise to 1 million mapped fragments??? Or use counts?
+Counts_per_million_cpm <- as.data.frame(apply(Oligo_counts, 2, function(x) x/sum(x)*1e6))
+
+for(id in c("input_rep", "STARRseq_rep")){
+  if(id=="STARRseq_rep") t="STARR-seq"
+  if(id=="input_rep") t="input"
+  
+  df_tmp <- Counts_per_million_cpm[,grep(id, names(Counts_per_million_cpm))]
+  
+  comparison_list <- list(a_b=c(names(Counts_per_million_cpm)[grep(id, names(Counts_per_million_cpm))[1]],
+                                names(Counts_per_million_cpm)[grep(id, names(Counts_per_million_cpm))[2]]),
+                          a_c=c(names(Counts_per_million_cpm)[grep(id, names(Counts_per_million_cpm))[1]],
+                                names(Counts_per_million_cpm)[grep(id, names(Counts_per_million_cpm))[3]]),
+                          b_c=c(names(Counts_per_million_cpm)[grep(id, names(Counts_per_million_cpm))[2]],
+                                names(Counts_per_million_cpm)[grep(id, names(Counts_per_million_cpm))[3]]))
+  
+  for(x in names(comparison_list)){
+    
+    a <- comparison_list[[x]][1]
+    b <- comparison_list[[x]][2]
+    
+    # PCC
+    pc <- cor.test(log10(df_tmp[apply(df_tmp,1,min)>0,a]),
+                   log10(df_tmp[apply(df_tmp,1,min)>0,b]),
+                   method = "pearson")
+    
+    if(id=="input_rep") my_col=c("#d9d9d9","#525252")
+    if(id=="STARRseq_rep") my_col=c("#737E92","#063887")
+    
+    # plot
+    scater <- ggplot(df_tmp, aes(df_tmp[,a], df_tmp[,b])) +
+      geom_pointdensity(adjust = 0.4, size=0.4) +
+      scale_color_gradient(low = my_col[1], high = my_col[2]) +
+      scale_x_log10(gsub("_", " ", a),
+                    limits=c(min(df_tmp[df_tmp!=0], na.rm=T), max(df_tmp, na.rm=T)),
+                    breaks=c(0,1,10,100,1000)) +
+      scale_y_log10(gsub("_", " ", b),
+                    limits=c(min(df_tmp[df_tmp!=0], na.rm=T), max(df_tmp, na.rm=T)),
+                    breaks=c(0,1,10,100,1000)) +
+      guides(color=F) +
+      theme_bw(base_size = 16) +
+      theme(panel.grid = element_blank(),
+            axis.text = element_text(colour="black"),
+            plot.title = element_text(hjust=0.5)) +
+      ggtitle(t) +
+      annotate("text",  x=min(df_tmp[df_tmp!=0], na.rm=T), y = max(df_tmp, na.rm=T), label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5)
+    
+    plot_list_tmp[[x]] <- ggplotGrob(scater)
+    
+  }
+  
+  # multiplot
+  print(gridExtra::grid.arrange(grobs = plot_list_tmp, nrow = 1))
+  
+}
+
+```
+
+## Calculate expression values with DESeq2
+
+```{r Twist oligo fold-change to input with DESeq2}
+
+Count_table <- read.delim("Oligo_counts.txt")
+Count_table <- Count_table[,c(1:15,grep("UMI", names(Count_table)))]
+rownames(Count_table) <- Count_table$Oligo_ID
+
+library(DESeq2)
+
+# save main table to add columns in the end
+Count_table_final <- Count_table
+
+# only sequences with at least 10 reads in both inputs
+table(rowSums(Count_table[,grep("input_", names(Count_table))]==0))
+Count_table_2 <- Count_table[rowSums(Count_table[,grep("input_", names(Count_table))]<10)==0,]
+
+cts <- Count_table_2[,grep("input|STARR", names(Count_table_2), ignore.case = T)]
+rownames(cts) <- Count_table_2$Oligo_ID
+
+# add one count to sequences not found in RNA
+cts[cts==0] <- 1
+
+# design
+coldata <- data.frame(type=factor(c(rep("Input",3), rep("Experiment",3)),levels=c("Input", "Experiment")),
+                      row.names = names(cts))
+
+if (!identical(which(coldata$type=="Input"), grep("input", rownames(coldata)))){
+  print("Input in design matrix does not match input samples")
+  break
+}
+if (!all(rownames(coldata) %in% colnames(cts))){
+  print("Rownames do not match colnames")
+  break
+}
+if (!all(rownames(coldata) == colnames(cts))){
+  print("Rownames do not match colnames")
+  break
+}
+
+dds <- DESeqDataSetFromMatrix(countData = as.matrix(cts),
+                              colData = coldata,
+                              design= ~ type)
+
+# use controls as sizeFactors - assumption that controls don't work
+sizeFactors(dds)=estimateSizeFactorsForMatrix(as.matrix(cts[grep("Neg_region_", rownames(cts)),]))
+dds <- DESeq(dds)
+
+# results
+res <- results(dds, alpha=0.05)
+
+# merge with main table
+tmp <- as.data.frame(res)[,c(1,2,5,6)]
+Count_table_final <- merge(Count_table_final, tmp, by.x=1, by.y=0, all.x=T)
+
+write.table(Count_table_final, "Final_table_all_oligos.txt", sep="\t", quote=F, row.names = F)
+
+# remove oligos with no activity values
+Count_table_final <- Count_table_final[complete.cases(Count_table_final$log2FoldChange),]
+
+write.table(Count_table_final, "Final_table.txt", sep="\t", quote=F, row.names = F)
+
+```
+
+## Prepare main table with motif pasting information and results
+
+```{r Load activity of each oligo and merge with metadata, eval=FALSE}
+
+# all oligo library
+Count_table_final <- read.delim("Oligo_counts.txt", stringsAsFactors = F)
+
+### activity of oligos
+df_twist <- read.delim("Final_table.txt", stringsAsFactors = F)[,c(1:5,10:21,23)]
+table(df_twist$Experiment)
+REEFSTARRseq_Swap_motif_instances_sequences <- df_twist[df_twist$Experiment %in% "Swap_motifs",]
+names(REEFSTARRseq_Swap_motif_instances_sequences)[9] <- "Mutation_log2FC_wt_mut_old_library"
+names(REEFSTARRseq_Swap_motif_instances_sequences)[18] <- "Activity"
+
+# add wt activity (match wt by strand) and calculate FC
+REEFSTARRseq_Swap_motif_instances_sequences$wt_activity <- sapply(REEFSTARRseq_Swap_motif_instances_sequences$Sequence_ID, function(e){
+  str <- unique(REEFSTARRseq_Swap_motif_instances_sequences$Strand[REEFSTARRseq_Swap_motif_instances_sequences$Sequence_ID %in% e])
+  activity <- df_twist$log2FoldChange[df_twist$Sequence_ID %in% e & df_twist$Strand %in% str & df_twist$Experiment %in% "Wt_enhancers"]
+  if(length(activity)==0) return(NA) else{return(activity)}
+})
+# calculate FC
+REEFSTARRseq_Swap_motif_instances_sequences$log2FC_wt_swapped <- REEFSTARRseq_Swap_motif_instances_sequences$Activity-REEFSTARRseq_Swap_motif_instances_sequences$wt_activity
+
+
+
+
+
+
+### keep enhancers active (more active than top negative region)
+REEFSTARRseq_Swap_motif_instances_sequences <- REEFSTARRseq_Swap_motif_instances_sequences[complete.cases(REEFSTARRseq_Swap_motif_instances_sequences$wt_activity) & 
+                                                                                             REEFSTARRseq_Swap_motif_instances_sequences$wt_activity>max(df_twist$log2FoldChange[grep("Neg_region_", df_twist$Oligo_ID)]),]
+length(unique(REEFSTARRseq_Swap_motif_instances_sequences$Sequence_ID)) # 784 enhancers
+table(REEFSTARRseq_Swap_motif_instances_sequences$Wt_motif, REEFSTARRseq_Swap_motif_instances_sequences$New_motif)
+
+### add original motif mutant information, from de Almeida et al 2022
+mutation_data <- readRDS("data/mutation_data.rds")
+mutation_data$mut_new_library <- df_twist$log2FoldChange[match(mutation_data$Oligo_ID, df_twist$Oligo_ID)] # update the motif mutation log2FC (below) with the data from these new STARR-seq runs and replicates
+
+mutated_instances <- do.call(rbind, lapply(1:nrow(REEFSTARRseq_Swap_motif_instances_sequences), function(i){
+  REEF_ID <- REEFSTARRseq_Swap_motif_instances_sequences$Oligo_ID[i]
+  enh <- REEFSTARRseq_Swap_motif_instances_sequences$Sequence_ID[i]
+  m <- REEFSTARRseq_Swap_motif_instances_sequences$Wt_motif[i]
+  ctr <- REEFSTARRseq_Swap_motif_instances_sequences$Motif_center[i]
+  
+  out <- mutation_data[mutation_data$Sequence_ID==enh & mutation_data$Motif %in% m & mutation_data$instance_start < ctr & mutation_data$instance_end > ctr,]
+  
+  if(nrow(out)>1 & length(which(complete.cases(out$mut)))>0) out <- out[complete.cases(out$mut),]
+  
+  # if mutated overlapping instance choose the closest one
+  if(nrow(out)>1) out <- out[order(abs((out$instance_start + (out$instance_end-out$instance_start)/2) -ctr)),][1,]
+  
+  # output
+  if(nrow(out)==0) return(data.frame(REEF_ID=REEF_ID,
+                                     Oligo_ID=NA,
+                                     instance_start=NA,
+                                     instance_end=NA,
+                                     wt_instance=NA,
+                                     mutant_variant=NA,
+                                     mut=NA,
+                                     wgkmSVM_motif_sum,
+                                     wgkmSVM_motif_average)
+  ) else{ return(cbind(REEF_ID, out[,c(2,28,29,31,32,35,33,34)])) }
+}))
+
+
+which(duplicated(mutated_instances$REEF_ID))
+which(!complete.cases(mutated_instances$Oligo_ID))
+
+names(mutated_instances) <- paste0("mut_inst_", names(mutated_instances))
+names(mutated_instances)[7] <- "motif_mut_activity"
+REEFSTARRseq_Swap_motif_instances_sequences_final <- cbind(REEFSTARRseq_Swap_motif_instances_sequences, mutated_instances[,-1])
+
+# calculate FC
+REEFSTARRseq_Swap_motif_instances_sequences_final$log2FC_wt_mut <- REEFSTARRseq_Swap_motif_instances_sequences_final$motif_mut_activity - REEFSTARRseq_Swap_motif_instances_sequences_final$wt_activity
+head(REEFSTARRseq_Swap_motif_instances_sequences_final)
+
+### For each enhancer, add row with activity and log2FC for motif mutant
+REEFSTARRseq_Swap_motif_instances_sequences_final$Instance_ID <- sapply(strsplit(as.character(REEFSTARRseq_Swap_motif_instances_sequences_final$Oligo_ID),"_to_"), `[`, 1)
+REEF_motif_mutants <- do.call(rbind, lapply(unique(REEFSTARRseq_Swap_motif_instances_sequences_final$Instance_ID), function(i){
+  out <- REEFSTARRseq_Swap_motif_instances_sequences_final[grep(i, REEFSTARRseq_Swap_motif_instances_sequences_final$Oligo_ID, fixed = T),][1,]
+  out$Oligo_ID <- paste0(i, "_to_mutant")
+  out$Sequence <- NA
+  out$New_motif <- "shuffle"
+  out$New_motif_sequence <- out$mut_inst_mutant_variant
+  out$Activity <- out$motif_mut_activity
+  out$log2FC_wt_swapped <- out$log2FC_wt_mut
+  
+  return(out)
+}))
+
+REEFSTARRseq_Swap_motif_instances_sequences_final <- rbind(REEFSTARRseq_Swap_motif_instances_sequences_final, REEF_motif_mutants)
+
+length(unique(REEFSTARRseq_Swap_motif_instances_sequences_final$Sequence_ID)) # 784 different enhancers
+length(unique(REEFSTARRseq_Swap_motif_instances_sequences_final$Instance_ID)) # 1475 different instances
+table(REEFSTARRseq_Swap_motif_instances_sequences_final$Wt_motif, REEFSTARRseq_Swap_motif_instances_sequences_final$New_motif)
+
+
+### correct motif factors
+REEFSTARRseq_Swap_motif_instances_sequences_final$Wt_motif <- factor(REEFSTARRseq_Swap_motif_instances_sequences_final$Wt_motif,
+                                                                     levels = c("FOSL1_MA0477.1", "TP53_MA0106.3", "MAFK_MA0496.2", "CREB1_MA0018.3", "ETS1_HUMAN.H11MO.0.A", "EGR1_C2H2_1", "MECP2_HUMAN.H11MO.0.C", "E2F1_HUMAN.H11MO.0.A"),
+                                                                     labels = c("AP-1", "P53", "MAF", "CREB1", "ETS", "EGR1", "MECP2", "E2F1"))
+REEFSTARRseq_Swap_motif_instances_sequences_final$New_motif <- factor(REEFSTARRseq_Swap_motif_instances_sequences_final$New_motif,
+                                                                      levels = c("shuffle", "FOSL1_MA0477.1", "TP53_MA0106.3", "MAFK_MA0496.2", "CREB1_MA0018.3", "ETS1_HUMAN.H11MO.0.A", "EGR1_C2H2_1", "MECP2_HUMAN.H11MO.0.C", "E2F1_HUMAN.H11MO.0.A"),
+                                                                      labels = c("shuffle", "AP-1", "P53", "MAF", "CREB1", "ETS", "EGR1", "MECP2", "E2F1"))
+
+
+saveRDS(REEFSTARRseq_Swap_motif_instances_sequences_final, "REEFSTARRseq_Swap_motif_instances_sequences_final.rds")
+
+```
+
+```{r get motif positions for all oligo sequences to remove cases where WT was not disrupted, eval=FALSE}
+
+library(motifmatchr)
+library(PWMEnrich)
+library(TFBSTools)
+library(seqinr)
+
+# Motifs
+TF_motif_human_list <- readRDS("data/TF_motif_human_list.rds")
+TF_motifs <- readRDS("data/Selected_motifs.rds")
+
+# All sequences
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final.rds") # disrupted and non-disrupted
+table(duplicated(df_main$Oligo_ID))
+
+# motif positions in oligo, lenient threshold to make sure the wt motif was removed
+motif_ix_pos <- matchMotifs(TF_motif_human_list$All_pwms_log_odds[name(TF_motif_human_list$All_pwms_log_odds) %in% TF_motifs$ID],
+                            as.character(df_main$Sequence),
+                            genome = "BSgenome.Hsapiens.UCSC.hg19", p.cutoff = 1e-3, bg="genome", out = "positions")
+names(motif_ix_pos) <- name(TF_motif_human_list$All_pwms_log_odds[name(TF_motif_human_list$All_pwms_log_odds) %in% TF_motifs$ID])
+
+library(plyranges)
+motif_ix_pos2 <- lapply(motif_ix_pos, function(motif_x){
+  names(motif_x) <- as.character(df_main$Oligo_ID)
+  motif_x <- motif_x[sapply(motif_x, length)>0] # remove sequences without motif
+  # join all IRanges in same GRanges
+  motif_x <- GRanges(names(unlist(motif_x)), #Use sequence ID as seqnames
+                     IRanges(start(unlist(motif_x)), end(unlist(motif_x))),
+                     strand = mcols(unlist(motif_x))$strand,
+                     score=mcols(unlist(motif_x))$score)
+  ### do not reduce - I want to make sure the swappings disrupted thw motif
+  # add wt sequence
+  motif_x$enh_strand <- df_main$Strand[match(as.character(motif_x@seqnames), as.character(df_main$Oligo_ID))]
+  motif_x$seq <- substr(as.character(df_main$Sequence[match(as.character(motif_x@seqnames), as.character(df_main$Oligo_ID))]),
+                        motif_x@ranges@start,
+                        motif_x@ranges@start+motif_x@ranges@width-1)
+  return(motif_x)
+}) 
+# lapply(motif_ix_pos2, function(i) table(width(i)))
+
+motif_ix_pos3 <- lapply(names(motif_ix_pos2), function(i){
+  x <- data.frame(motif_ix_pos2[[i]], stringsAsFactors = F)
+  names(x)[1] <- "Sequence"
+  x$Sequence <- as.character(x$Sequence)
+  x$strand <- as.character(x$strand)
+  x$Motif <- TF_motifs$Motif[TF_motifs$ID %in% i]
+  return(x)
+})
+names(motif_ix_pos3) <- names(motif_ix_pos2)
+
+sapply(motif_ix_pos2, length)
+sapply(motif_ix_pos3, nrow)
+
+Endogenous_sequences_motif_positions_all <- do.call(rbind, motif_ix_pos3)
+Endogenous_sequences_motif_positions_all$Motif <- gsub("AP1", "AP-1", Endogenous_sequences_motif_positions_all$Motif)
+
+saveRDS(Endogenous_sequences_motif_positions_all, file = "Oligo_sequenuces_motif_positions_p1e-3.rds")
+
+```
+
+```{r exclude motif swaps where WT motif is not disrupted, eval=FALSE}
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final.rds")
+table(df_main$Wt_motif)
+table(df_main$New_motif)
+table(df_main$Wt_motif, df_main$New_motif)
+
+### Get WT motif scores
+Endogenous_sequences_motif_positions_all_wt <- readRDS("Oligo_sequenuces_motif_positions_p1e-3.rds")
+Endogenous_sequences_motif_positions_all_wt$Motif <- gsub("AP1", "AP-1", Endogenous_sequences_motif_positions_all_wt$Motif)
+Endogenous_sequences_motif_positions_all_wt$instance_center <- Endogenous_sequences_motif_positions_all_wt$start+(Endogenous_sequences_motif_positions_all_wt$end-Endogenous_sequences_motif_positions_all_wt$start)/2
+
+df_main$WT_motif_score <- sapply(1:nrow(df_main), function(i){
+  out <- Endogenous_sequences_motif_positions_all_wt[Endogenous_sequences_motif_positions_all_wt$Sequence %in% df_main$Sequence_ID[i] & #same oligo
+                                                       Endogenous_sequences_motif_positions_all_wt$Motif == df_main$Wt_motif[i],]
+  return(out$max_score[order(abs(out$instance_center - df_main$Motif_center[i]), decreasing = T)][1])
+})
+
+### select only swaps that disrupt the wt motif - because if the WT remains we cannot interpret the result
+# Motifs
+Endogenous_sequences_motif_positions_all <- readRDS("Oligo_sequenuces_motif_positions_p1e-3.rds") # less stringent threshold
+Endogenous_sequences_motif_positions_all$instance_center <- Endogenous_sequences_motif_positions_all$start+(Endogenous_sequences_motif_positions_all$end-Endogenous_sequences_motif_positions_all$start)/2
+
+df_main$Motif_disrupted <- sapply(1:nrow(df_main), function(i){
+  nrow(Endogenous_sequences_motif_positions_all[Endogenous_sequences_motif_positions_all$Sequence %in% df_main$Oligo_ID[i] & #same oligo
+                                                  Endogenous_sequences_motif_positions_all$Motif == df_main$Wt_motif[i] & #same wt motif
+                                                  abs(Endogenous_sequences_motif_positions_all$instance_center - df_main$Motif_center[i]) <= 5,]) == 0 # near the original position
+})
+df_main$Motif_disrupted <- factor(df_main$Motif_disrupted, levels=c("TRUE", "FALSE"))
+
+table(df_main$Motif_disrupted)
+table(df_main$Wt_motif, df_main$Motif_disrupted)
+table(df_main$New_motif, df_main$Motif_disrupted)
+table(WT=df_main$Wt_motif, New=df_main$New_motif, df_main$Motif_disrupted)
+# AP-1 -> MAF
+# MAF -> AP-1
+# P53 -> CREB1/MECP2
+# MECP2 -> ETS
+# ETS -> E2F1
+# EGR1 -> MECP2/E2F1
+
+### save table keeping only swaps that disrupt the wt motif
+out <- df_main[df_main$Motif_disrupted %in% "TRUE",]
+table(out$Wt_motif, out$New_motif)
+out <- out[!(out$Wt_motif=="P53" & out$New_motif=="MECP2"),] # pasting short MECP2 motif in middle of P53 motif likely does not mutate it, so better not include it
+out <- out[!(out$Wt_motif=="P53" & out$New_motif=="CREB1"),] # pasting short CREB1 motif in middle of P53 motif likely does not mutate it, so better not include it
+
+saveRDS(out, "REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+```
+
+### Supplementary Table 6
+
+```{r Save Supplementary Table 6}
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+# filter for important instances
+log2FC_cutoff <- -1
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+df$log2FC_mut_pasted <- df$Activity-df$motif_mut_activity
+table(df$Wt_motif[!duplicated(df$Instance_ID)])
+
+length(unique(df$Instance_ID)) # 1354 instances tested
+length(unique(df$Sequence_ID)) # in 753 enhancers tested
+
+out <- df[,-c(4,9,21:25,27,28,31,32)]
+names(out)[18] <- "log2FC_wt_pasted"
+write.table(out[,c(1:4,21,5:20,22)], "Supplementary_Table_6.txt", sep="\t", quote=F, row.names=F)
+
+```
+
+## Analyse motif pasting results
+
+### Fig S17B - plot enhancer activity of different sequences
+
+```{r plot enhancer activity of different constructs}
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+table(df_main$Wt_motif, df_main$New_motif)
+
+# filter for important instances
+table(df_main$Wt_motif, df_main$log2FC_wt_mut <= -1)
+table(df_main$Wt_motif, df_main$log2FC_wt_mut <= -2)
+log2FC_cutoff <- -1
+
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+table(df$Wt_motif[!duplicated(df$Instance_ID)])
+
+# reorder levels
+df$New_motif <- factor(df$New_motif, levels = rev(df %>% group_by(New_motif) %>% summarise(act=median(Activity, na.rm=T)) %>% arrange(desc(act, )) %>% pull(New_motif)))
+
+violin <- ggplot(df,
+                 aes(New_motif, Activity, colour=New_motif, fill=New_motif)) +
+  geom_violin(size=0.7) +
+  geom_boxplot(col="black", fill=NA, size=0.7, outlier.size = -1, width=0.2) +
+  geom_violin(data=df[!duplicated(df$Instance_ID),], aes("WT enh", wt_activity), size=0.7, colour="orangered", fill="orangered") +
+  geom_boxplot(data=df[!duplicated(df$Instance_ID),], aes("WT enh", wt_activity), col="black", fill=NA, size=0.7, outlier.size = -1, width=0.2) +
+  scale_colour_manual(values=motif_colours) + 
+  scale_fill_manual(values=motif_colours) +
+  guides(fill="none", col="none") +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 enhancer activity", breaks = seq(-10,10,2)) +
+  scale_x_discrete("", limits=c("WT enh", levels(df$New_motif)), labels=c("WT enh", "mutant", levels(df$New_motif)[-1])) +
+  ggtitle(paste0("Summary of individual motif swapping (n=",length(unique(df$Instance_ID))," inst each)"))
+
+print(violin)
+
+```
+
+### Fig 5A, S19A - Activity of pasted motifs across different enhancer positions
+
+```{r Activity of pasted motifs at different enhancer positions}
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+# filter for important instances
+table(df_main$Wt_motif, df_main$log2FC_wt_mut <= -1)
+table(df_main$Wt_motif, df_main$log2FC_wt_mut <= -2)
+log2FC_cutoff <- -1
+
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+table(df$Wt_motif[!duplicated(df$Instance_ID)])
+
+# reorder levels
+df$New_motif <- factor(df$New_motif, levels = c("shuffle", "P53", "CREB1", "AP-1", "MAF", "EGR1", "ETS", "MECP2", "E2F1"))
+
+# all
+# compare with summary results of pasting the different motif types individually
+
+violin <- ggplot(df, aes(New_motif, log2FC_wt_swapped, colour=New_motif, fill=New_motif)) +
+  geom_violin(size=0.7) +
+  geom_boxplot(col="black", fill=NA, size=0.7, outlier.size = -1, width=0.2) +
+  scale_colour_manual(values=motif_colours) + 
+  scale_fill_manual(values=motif_colours) +
+  guides(fill="none", col="none") +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 FC enhancer activity to wt", breaks = seq(-10,10,2)) +
+  scale_x_discrete("New motif") +
+  ggtitle(paste0("Summary of individual motif swapping (n=",length(unique(df$Instance_ID))," inst each)"))
+
+# compare to shuffle mutant
+violin2 <- ggplot(df[!df$New_motif=="shuffle",], aes(New_motif, Activity-motif_mut_activity, colour=New_motif, fill=New_motif)) +
+  geom_violin(size=0.7) +
+  geom_boxplot(col="black", fill=NA, size=0.7, outlier.size = -1, width=0.2) +
+  scale_colour_manual(values=motif_colours) + 
+  scale_fill_manual(values=motif_colours) +
+  guides(fill="none", col="none") +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 FC enhancer activity to mutant", breaks = seq(-10,10,2)) +
+  scale_x_discrete("Pasted motif") +
+  ggtitle(paste0("Summary of individual motif swapping (n=",length(unique(df$Instance_ID))," inst each)"))
+
+violin_WT <- ggplot(df, aes(New_motif, Activity, colour=New_motif, fill=New_motif)) +
+  geom_violin(size=0.7) +
+  geom_boxplot(col="black", fill=NA, size=0.7, outlier.size = -1, width=0.2) +
+  scale_colour_manual(values=motif_colours) + 
+  scale_fill_manual(values=motif_colours) +
+  guides(fill="none", col="none") +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 enhancer activity", breaks = seq(-10,10,2)) +
+  scale_x_discrete("New motif") +
+  ggtitle(paste0("Summary of individual motif swapping (n=",length(unique(df$Instance_ID))," inst each)"))
+
+print(violin2)
+print(violin_WT)
+print(violin)
+
+
+
+# per wt motif
+gg <- ggplot(df, aes(New_motif, log2FC_wt_swapped, fill=Wt_motif)) +
+  geom_boxplot(outlier.size = 0.4) +
+  scale_fill_manual("Replaced\nmotif", values=motif_colours[as.character(df$Wt_motif)]) +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 FC enhancer activity to wt", breaks = seq(-10,10,2)) +
+  scale_x_discrete("Pasted motif", breaks=levels(df$New_motif)) +
+  ggtitle(paste0(length(unique(df$Instance_ID)), " instances"))
+
+
+# compare to shuffled mutant
+gg2 <- ggplot(df[!df$New_motif=="shuffle",], aes(New_motif, Activity-motif_mut_activity, fill=Wt_motif)) +
+  geom_boxplot(outlier.size = 0.4) +
+  scale_fill_manual("Replaced\nmotif", values=motif_colours[as.character(df$Wt_motif)]) +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 FC enhancer activity to mutant", breaks = seq(-10,10,2)) +
+  scale_x_discrete("Pasted motif", breaks=levels(df$New_motif)) +
+  ggtitle(paste0(length(unique(df$Instance_ID)), " instances"))
+
+print(gg2)
+print(gg)
+
+```
+
+### Fig S18, 5C - pairwise comparisons between pasted motifs
+
+```{r pairwise comparisons between pasted motifs}
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+# filter for important instances
+log2FC_cutoff <- -1
+
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+table(df$Wt_motif[!duplicated(df$Instance_ID)])
+
+# crate matrix motif swapped vs new motif
+df$log2FC_mut_swapped <- df$Activity-df$motif_mut_activity
+df_matrix <- data.table::dcast(df, Instance_ID + Wt_motif ~ New_motif, value.var = "log2FC_mut_swapped", fun=mean)[,-3]
+
+### correlation heatmap - Pearson
+require(pheatmap)
+breaksList=seq(0,1,length.out = 200)
+mycol = colorRampPalette(rev(RColorBrewer::brewer.pal(n = 7, name = "RdYlBu")))(length(breaksList))
+
+
+cormat <- cor(df_matrix[,-c(1,2)], method = "pearson", use = "pairwise.complete.obs")
+print(pheatmap(cormat,
+               clustering_distance_cols = as.dist(1 - cormat),
+               clustering_distance_rows = as.dist(1 - cormat),
+               fontsize_row = 10,
+               angle_col = 0,
+               #fontsize_col = 12,
+               show_colnames = F,
+               color=mycol,
+               breaks=breaksList,
+               border_color = NA,
+               main=paste0("Motif types - PCC")))
+
+# pearson out
+cor_function <- function(matrix){
+  cors <- cor(x = matrix, method = "pearson", use = "pairwise.complete.obs")
+  cor.data <- cors[upper.tri(cors, diag = FALSE)]  # we're only interested in one of the off-diagonals, otherwise there'd be duplicates
+  cor.data <- as.data.frame(cor.data)  # that's how ggplot likes it
+  colnames(cor.data) <- "corr"
+  return(cor.data$corr)
+}
+
+### pairwise comparison plots
+# for(i1 in 3:(ncol(df_matrix)-1)){
+  # for(i2 in (i1+1):ncol(df_matrix)){
+
+# example for AP-1
+for(i1 in 3){
+  for(i2 in c(4,8,7)){
+    
+    tmp <- df_matrix
+    
+    m1 <- names(tmp)[i1]
+    m2 <- names(tmp)[i2]
+    
+    # PCC - not using zeros
+    pc <- cor.test(tmp[,m1],
+                   tmp[,m2],
+                   method = "pearson")
+    
+    my_col=c("grey60","orangered")
+    
+    # colour points
+    tmp$col <- ""
+    tmp$col[tmp[,m1] - tmp[,m2] >= 1] <- m1
+    tmp$col[tmp[,m2] - tmp[,m1] >= 1] <- m2
+    tmp$col <- factor(tmp$col, levels = c("", m1, m2))
+    
+    # plot
+    scater <- ggplot(tmp, aes(tmp[,m1], tmp[,m2], col=col)) +
+      geom_point(size=1.5) +
+      scale_colour_manual("Preferential\nactivity", values=c("grey50", motif_colours[m1], motif_colours[m2])) +
+      guides(col="none") +
+      # geom_hline(yintercept = 0, linetype="dashed", col="grey75") +
+      # geom_vline(xintercept = 0, linetype="dashed", col="grey75") +
+      geom_abline(intercept = 0, linetype="dashed", slope = 1, col="grey20") +
+      scale_x_continuous(paste0(m1, " (log2 FC to mut)"),
+                         breaks=seq(-10,20,2)) +
+      scale_y_continuous(paste0(m2, " (log2 FC to mut)"),
+                         breaks=seq(-10,20,2)) +
+      theme_bw(base_size = 15) +
+      theme(panel.grid = element_blank(),
+            axis.text = element_text(colour="black"),
+            plot.title = element_text(hjust=0.5, size=15)) +
+      annotate("text",  x=min(tmp[,m1], na.rm=T), y = max(tmp[,m2], na.rm=T), label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5)
+    
+    # colour by original motif
+    scater2 <- ggplot(df_matrix, aes(df_matrix[,m1], df_matrix[,m2], col=Wt_motif)) +
+      geom_point(size=1.5) +
+      scale_colour_manual("wt motif", values=motif_colours[as.character(df_matrix$Wt_motif)]) +
+      geom_hline(yintercept = 0, linetype="dashed", col="grey75") +
+      geom_vline(xintercept = 0, linetype="dashed", col="grey75") +
+      geom_abline(intercept = 0, slope = 1, col="grey20") +
+      scale_x_continuous(paste0(m1, " (log2 FC to mut)"),
+                         breaks=seq(-10,20,2)) +
+      scale_y_continuous(paste0(m2, " (log2 FC to mut)"),
+                         breaks=seq(-10,20,2)) +
+      theme_bw(base_size = 15) +
+      theme(panel.grid = element_blank(),
+            axis.text = element_text(colour="black"),
+            plot.title = element_text(hjust=0.5, size=15))
+    
+    print(scater)  
+    print(scater2)
+    
+  }
+}
+
+
+```
+
+### Fig 5B - Clustering of all instances per motif pasted activity
+
+```{r Clustering of all instances per motif pasted activity}
+
+require(pheatmap)
+require(RColorBrewer)
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+# filter for important instances
+log2FC_cutoff <- -1
+
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+table(df$Wt_motif[!duplicated(df$Instance_ID)])
+
+# crate matrix motif swapped vs new motif
+df$log2FC_mut_swapped <- df$Activity-df$motif_mut_activity
+df_matrix <- data.table::dcast(df, Instance_ID + Wt_motif ~ New_motif, value.var = "log2FC_mut_swapped", fun=mean)[,-3]
+
+# Remove instances for which only 2 or less motif swapps didn't work
+table(apply(is.na(df_matrix[,-c(1:2)]), 1, sum))
+df_matrix <- df_matrix[apply(is.na(df_matrix[,-c(1:2)]), 1, sum) <= 2,]
+
+dat <- df_matrix[,-c(1:2)]
+rownames(dat) <- df_matrix$Instance_ID
+
+### annotations
+instance_row <- data.frame("Wt motif" = df_matrix$Wt_motif,
+                           row.names = df_matrix$Instance_ID)
+
+# Pearson clustering heatmap
+# Pairwise correlation between samples (columns)
+cols.cor <- cor(dat, use = "pairwise.complete.obs", method = "pearson")
+# Pairwise correlation between rows (genes)
+rows.cor <- cor(t(dat), use = "pairwise.complete.obs", method = "pearson")
+table(is.na(rows.cor))
+
+# colours and breaks
+library(RColorBrewer)
+s=1
+myBreaks = seq(floor(min(dat, na.rm=T)), ceiling(max(dat, na.rm=T)), by = s)
+
+myColor <- c(colorRampPalette(
+  c("#2166AC", "#4393C3", "#92C5DE",
+    "#D1E5F0"))(abs(floor(min(dat, na.rm=T))*(1/s))-1),
+  "white", "white",
+  colorRampPalette(
+    c("#FDDBC7", "#F4A582",
+      "#D6604D", "#B2182B"))((ceiling(max(dat, na.rm=T))*(1/s))-1))
+
+heatmap_pearson <- pheatmap(dat,
+                            color=myColor, breaks=myBreaks,
+                            clustering_distance_cols = as.dist(1 - cols.cor),
+                            clustering_distance_rows = as.dist(1 - rows.cor),
+                            angle_col = 90,
+                            border_color = NA,
+                            legend_breaks=seq(-10,10,2),
+                            show_rownames = F,
+                            fontsize_col=11,
+                            main=paste0("log2 FC to mut (", nrow(dat), " instances)"),
+                            width = 5.5, height = 7
+)
+
+```
+
+## Model motif pasting results based on wt motif and motif pasted
+
+### Fig 5D, S19B - Variance explained by different wildtype and pasted motif identity
+
+```{r Variance explained by different features of the model}
+
+require(ggpointdensity)
+require(patchwork)
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+# filter for important instances
+log2FC_cutoff <- -1
+
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & complete.cases(df_main$log2FC_wt_swapped) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+
+# remove shuffled variant
+df <- df[!df$New_motif %in% "shuffle",]
+
+### for different formulas
+df$log2FC_mut_swapped <- df$Activity-df$motif_mut_activity
+formula_list <- list(lm(log2FC_mut_swapped ~ Wt_motif, df),
+                     lm(log2FC_mut_swapped ~ New_motif, df),
+                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif, df),
+                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + New_motif, df),
+                     lm(log2FC_mut_swapped ~ Wt_motif + New_motif, df),
+                     lm(log2FC_mut_swapped ~ Wt_motif * New_motif, df),
+                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif + New_motif, df),
+                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif * New_motif, df))
+
+# linear model
+fit <- lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif * New_motif, df)
+
+# How much variance explained by each feature
+af <- anova(fit)
+af$PctExp <- af$"Sum Sq"/sum(af$"Sum Sq")*100
+af$variable <- factor(rownames(af), levels = rev(c("log2FC_wt_mut", "Sequence_ID", "Instance_ID", "Wt_motif", "New_motif", "Wt_motif:New_motif", "Instance_ID:New_motif", "Residuals")),
+                      labels = rev(c("wt motif imp.", "Sequence ID", "Instance ID", "WT motif", "Pasted motif", "WT:Pasted motif interaction", "Instance ID:Pasted motif", "Residuals")))
+
+# barplot
+barplot <- ggplot(af, aes("", PctExp, fill=variable)) +
+  geom_col() +
+  scale_fill_manual("Features", values = rev(c("wt motif imp."="#984ea3", "WT motif"="#e41a1c", "Pasted motif"="#377eb8", "WT:Pasted motif interaction"="#4daf4a", "Residuals"="grey60"))) +
+  scale_y_continuous("Variance explained [%]", breaks=seq(-100,100,20), expand = c(0,0)) +
+  ggtitle(paste0(nrow(df), " positions (adjR2: ", round(summary(fit)$adj.r.squared,2), ")")) +
+  theme(axis.text = element_text(colour="black", size=14),
+        axis.title = element_text(colour="black", size=16),
+        axis.title.x = element_blank(), axis.ticks.x = element_blank())
+
+out <- data.frame(obs=df$log2FC_mut_swapped,
+                  pred=predict(fit, df))
+scater <- ggplot(out, aes(obs, pred)) +
+  geom_pointdensity(adjust = 1.3) +
+  scale_color_gradient(low = "grey70", high = "grey20") +
+  guides(col="none") +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey70") +
+  geom_vline(xintercept = 0, linetype="dashed", col="grey70") +
+  geom_abline(intercept = 0, slope = 1, col="grey20") +
+  scale_x_continuous(paste0("Observed (log2 FC enhancer activity to mut)"),
+                     breaks=seq(-10,20,2)) +
+  scale_y_continuous(paste0("Predicted (log2 FC enhancer activity to mut)"),
+                     breaks=seq(-10,20,2)) +
+  theme(axis.text = element_text(colour="black", size=14),
+        axis.title = element_text(colour="black", size=16),
+        plot.title = element_text(size=11)) +
+  ggtitle(paste(as.character(fit$call$formula)[2], as.character(fit$call$formula)[1], as.character(fit$call$formula)[3])) +
+  annotate("text",  x=min(out$obs, na.rm=T), y = max(out$pred, na.rm=T), label = paste0("PCC: ", round(cor(out$obs, out$pred),2)), vjust=1, hjust=0, size=5)
+
+print(barplot + scater +  plot_layout(widths = c(1, 5)))
+
+```
+
+## Analyses of motif contexts
+
+```{r get motif positions for all oligo sequences, eval=FALSE}
+
+library(motifmatchr)
+library(PWMEnrich)
+library(TFBSTools)
+library(seqinr)
+
+# Motifs
+TF_motif_human_list <- readRDS("data/TF_motif_human_list.rds")
+View(TF_motif_human_list$metadata)
+TF_motifs <- readRDS("data/Selected_motifs.rds")
+
+# All sequences
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final.rds") # disrupted and non-disrupted
+table(duplicated(df_main$Oligo_ID))
+
+# motif positions in oligo
+motif_ix_pos <- matchMotifs(TF_motif_human_list$All_pwms_log_odds[name(TF_motif_human_list$All_pwms_log_odds) %in% TF_motifs$ID],
+                            as.character(df_main$Sequence),
+                            genome = "BSgenome.Hsapiens.UCSC.hg19", p.cutoff = 5e-4, bg="genome", out = "positions")
+names(motif_ix_pos) <- name(TF_motif_human_list$All_pwms_log_odds[name(TF_motif_human_list$All_pwms_log_odds) %in% TF_motifs$ID])
+
+library(plyranges)
+motif_ix_pos2 <- lapply(motif_ix_pos, function(motif_x){
+  names(motif_x) <- as.character(df_main$Oligo_ID)
+  motif_x <- motif_x[sapply(motif_x, length)>0] # remove sequences without motif
+  # join all IRanges in same GRanges
+  motif_x <- GRanges(names(unlist(motif_x)), #Use sequence ID as seqnames
+                     IRanges(start(unlist(motif_x)), end(unlist(motif_x))),
+                     strand = mcols(unlist(motif_x))$strand,
+                     score=mcols(unlist(motif_x))$score)
+  ### reduce - keep strand information
+  # motif_x <- my_reduce(motif_x, min.frac.ov=0.7)
+  ## instead, use plyranges::reduce_ranges to get motif score back - but here there is no min overlap
+  # motif_x <- reduce_ranges(motif_x, max_score = max(score), sum_score = sum(score), Number=n()) # bad because one bp overlapping is too stringent, use the adapted version below
+  motif_x <- my_reduce_with_score(motif_x, min.frac.ov=0.5)
+  # add wt sequence
+  motif_x$enh_strand <- df_main$Strand[match(as.character(motif_x@seqnames), as.character(df_main$Oligo_ID))]
+  motif_x$seq <- substr(as.character(df_main$Sequence[match(as.character(motif_x@seqnames), as.character(df_main$Oligo_ID))]),
+                        motif_x@ranges@start,
+                        motif_x@ranges@start+motif_x@ranges@width-1)
+  return(motif_x)
+}) 
+lapply(motif_ix_pos2, function(i) table(width(i)))
+
+motif_ix_pos3 <- lapply(names(motif_ix_pos2), function(i){
+  x <- data.frame(motif_ix_pos2[[i]], stringsAsFactors = F)
+  names(x)[1] <- "Sequence"
+  x$Sequence <- as.character(x$Sequence)
+  x$strand <- as.character(x$strand)
+  x$Motif <- TF_motifs$Motif[TF_motifs$ID %in% i]
+  return(x)
+})
+names(motif_ix_pos3) <- names(motif_ix_pos2)
+
+sapply(motif_ix_pos2, length)
+sapply(motif_ix_pos3, nrow)
+
+Endogenous_sequences_motif_positions_all <- do.call(rbind, motif_ix_pos3)
+Endogenous_sequences_motif_positions_all$Motif <- gsub("AP1", "AP-1", Endogenous_sequences_motif_positions_all$Motif)
+
+saveRDS(Endogenous_sequences_motif_positions_all, file = "Endogenous_sequences_motif_positions_all_oligos.rds")
+
+```
+
+```{r Linear model per TF motif with motif syntax features, eval=FALSE}
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+
+# filter for important instances
+log2FC_cutoff <- -1
+
+df <- df_main[complete.cases(df_main$log2FC_wt_mut) & complete.cases(df_main$log2FC_wt_swapped) & df_main$log2FC_wt_mut <= log2FC_cutoff,]
+
+# remove shuffled variant
+df <- df[!df$New_motif %in% "shuffle",]
+
+# Use E2F1 as reference for WTmotif because it seems to be the closest to the average
+df$Wt_motif <- relevel(df$Wt_motif, "E2F1")
+
+# add FC to mutant
+df$log2FC_mut_swapped <- df$Activity-df$motif_mut_activity
+
+# extend motif pasted sequence to get flanks
+motif_flank_length <- 5 # add 5bp on each side
+df$instance_sequence_extended_5bp <- sapply(1:nrow(df), function(i){
+  substr(as.character(df$Sequence[i]),
+         df$mut_inst_instance_start[i]-7,
+         df$mut_inst_instance_end[i]+7)
+})
+df$instance_sequence_up_5bp <- sapply(1:nrow(df), function(i){
+  substr(as.character(df$Sequence[i]),
+         df$Motif_center[i]-(ceiling(nchar(as.character(df$New_motif_sequence[i]))/2))-motif_flank_length+1,
+         df$Motif_center[i]-(ceiling(nchar(as.character(df$New_motif_sequence[i]))/2)))
+})
+df$instance_sequence_down_5bp <- sapply(1:nrow(df), function(i){
+  substr(as.character(df$Sequence[i]),
+         df$Motif_center[i]+(floor(nchar(as.character(df$New_motif_sequence[i]))/2)+1),
+         df$Motif_center[i]+(floor(nchar(as.character(df$New_motif_sequence[i]))/2)+1)+motif_flank_length-1)
+})
+
+# Motifs
+Endogenous_sequences_motif_positions_all <- readRDS("Endogenous_sequences_motif_positions_all_oligos.rds")
+Endogenous_sequences_motif_positions_all$instance_center <- Endogenous_sequences_motif_positions_all$start+(Endogenous_sequences_motif_positions_all$end-Endogenous_sequences_motif_positions_all$start)/2
+
+# multiple models (with caret) with motif counts, presence of other motifs, and motif flanks
+# 10-fold CV
+require(caret)
+trctrl <- trainControl(method = "repeatedcv",
+                       number = 10,
+                       repeats = 1,
+                       classProbs = T,
+                       savePredictions = T)
+
+### features important per motif
+cand <- as.character(unique(df$New_motif))
+names(cand) <- cand
+model_list <- lapply(cand, function(m){
+  
+  df_tmp <- df[df$New_motif %in% m,]
+  
+  # motif flanks
+  df_tmp <- df_tmp[nchar(df_tmp$instance_sequence_up_5bp)==median(nchar(df_tmp$instance_sequence_up_5bp)) & nchar(df_tmp$instance_sequence_down_5bp)==median(nchar(df_tmp$instance_sequence_down_5bp)),]
+  up <- as.data.frame(sapply(1:max(nchar(df_tmp$instance_sequence_up_5bp)), function(i) sapply(strsplit(df_tmp$instance_sequence_up_5bp,""), `[`, i)))
+  down <- as.data.frame(sapply(1:max(nchar(df_tmp$instance_sequence_down_5bp)), function(i) sapply(strsplit(df_tmp$instance_sequence_down_5bp,""), `[`, i)))
+  names(up) <- paste0("flank_left_", 5:1)
+  names(down) <- paste0("flank_right_", 1:5)
+  df_tmp <- cbind(df_tmp, up, down)
+  
+  # motif distances
+  add_dist <- lapply(unique(Endogenous_sequences_motif_positions_all$Motif), function(m2){
+    Distance <- sapply(1:nrow(df_tmp), function(s){
+      m2_df <- Endogenous_sequences_motif_positions_all[Endogenous_sequences_motif_positions_all$Sequence %in% df_tmp$Oligo_ID[s] & Endogenous_sequences_motif_positions_all$Motif %in% m2,]
+      
+      # exclude the same instance
+      hi <- queryHits(findOverlaps(GRanges(m2_df$Sequence, IRanges(m2_df$start, m2_df$end)),
+                                   GRanges(df_tmp$Oligo_ID[s], IRanges(df_tmp$mut_inst_instance_start[s], df_tmp$mut_inst_instance_end[s])),
+                                   minoverlap = 4))
+      if(length(hi)>0){
+        if(df_tmp$New_motif[s]==m2) m2_df <- m2_df[-hi,]
+        
+        # also the two motifs are similar, and PWM matching find each other
+        if((df_tmp$New_motif[s]=="ETS" & m2=="MECP2") | (df_tmp$New_motif[s]=="MECP2" & m2=="ETS") | (df_tmp$New_motif[s]=="AP-1" & m2=="MAF") | (df_tmp$New_motif[s]=="MAF" & m2=="AP-1")) m2_df <- m2_df[-hi,]
+        
+      }
+      
+      if(nrow(m2_df)>0){
+        dist <- m2_df$instance_center-df_tmp$Motif_center[s]
+        return(dist[abs(dist)==min(abs(dist))][1])
+      }else{return(NA)}
+    })
+    out <- data.frame(abs(Distance))
+    names(out) <- paste0(m2, "_dist")
+    
+    # only close and distal
+    out[,paste0("Close_", m2)] <- "NO"
+    out[,paste0("Close_", m2)][which(out[,1] <= 25)] <- "Close"
+    out[,paste0("Close_", m2)][which(out[,1] > 25)] <- "Distal"
+    out[,paste0("Close_", m2)] <- relevel(factor(out[,paste0("Close_", m2)]),
+                                          "NO")
+    
+    return(out)
+  })
+  
+  # merge all features
+  df_tmp <- cbind(df_tmp, do.call(cbind, add_dist))
+  
+  
+  # add position of the motif
+  df_tmp$motif_position <- "center"
+  df_tmp$motif_position[df_tmp$Motif_center<=100 | df_tmp$Motif_center>=150] <- "flanks" # outside middle 100bp
+  df_tmp$motif_position[df_tmp$Motif_center<=74 | df_tmp$Motif_center>=175] <- "boundaries" # outside middle 100bp
+  df_tmp$motif_position <- factor(df_tmp$motif_position, levels = c("flanks", "center", "boundaries"))
+  table(df_tmp$motif_position)
+  
+  #use motif importance as the negative log2FC -> positive means more important
+  df_tmp$motif_importance_minus_log2FC_wt_mut <- -df_tmp$log2FC_wt_mut
+  
+  ### models
+  model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_model <- lm(log2FC_mut_swapped ~ . , data=df_tmp[,grep("log2FC_mut_swapped|motif_importance_minus_log2FC_wt_mut|Wt_motif$|Close_|flank_|motif_position", names(df_tmp))])
+  model_log2FC_mut_swapped_and_importance_no_number_plus_flanks <- train(log2FC_mut_swapped ~ . , data=df_tmp[,grep("log2FC_mut_swapped|motif_importance_minus_log2FC_wt_mut|Wt_motif$|Close_|flank_|motif_position", names(df_tmp))], method = "lm",
+                                                                         trControl=trctrl,
+                                                                         importance = TRUE,
+                                                                         # preProcess = c("center", "scale"),
+                                                                         tuneLength = 1)
+  model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_pred <- model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$pred
+  
+  return(list(Data=df_tmp,
+              model_log2FC_mut_swapped_and_importance_no_number_plus_flanks=list(Model_trained=model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_model,
+                                                                                 Pred=model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_pred,
+                                                                                 adj.r.squared=summary(lm(model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_pred$pred~model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_pred$obs))$adj.r.squared,
+                                                                                 PCC=cor.test(model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_pred$pred, model_log2FC_mut_swapped_and_importance_no_number_plus_flanks_pred$obs)$estimate)
+  ))
+  
+})
+
+saveRDS(model_list, "List_motif_model_results_syntax_features.rds")
+
+```
+
+### Fig S21 - linear model performances
+
+```{r plot linear model predictions vs observations and variance explained}
+
+model_list <- readRDS("List_motif_model_results_syntax_features.rds")
+
+vars <- c("motif_importance_minus_log2FC_wt_mut",
+          "Wt_motif",
+          "motif_position",
+          "flank_",
+          paste0("Close_AP-1"),
+          paste0("Close_P53"),
+          paste0("Close_MAF"),
+          paste0("Close_CREB1"),
+          paste0("Close_ETS"),
+          paste0("Close_EGR1"),
+          paste0("Close_MECP2"),
+          paste0("Close_E2F1")
+)
+names(vars) <- c("wt motif importance",
+                 "wt motif type",
+                 "Motif position",
+                 "Motif flanks",
+                 paste0("Dist to AP-1"),
+                 paste0("Dist to P53"),
+                 paste0("Dist to MAF"),
+                 paste0("Dist to CREB1"),
+                 paste0("Dist to ETS"),
+                 paste0("Dist to EGR1"),
+                 paste0("Dist to MECP2"),
+                 paste0("Dist to E2F1")
+)
+
+Var_table <- data.frame()
+for(motif in names(model_list)){
+  for(model in names(model_list[[motif]])[[2]]){
+    tmp <- model_list[[motif]][[model]]$Pred
+    
+    pc <- cor.test(tmp$pred, tmp$obs,
+                   method = "pearson", use="complete.obs")
+    
+    g2 <- ggplot(tmp, aes(pred, obs)) +
+      geom_pointdensity() +
+      scale_color_gradient(low = "grey70", high = motif_colours[[motif]]) +
+      guides(col=F) +
+      scale_y_continuous(paste0("log2 FC enh act [observed]"), breaks = seq(-10,10,2)) +
+      scale_x_continuous(paste0("log2 FC enh act [predicted]"), breaks = seq(-10,10,2)) +
+      ggtitle(motif) +
+      geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+      annotate("text",  x=min(tmp$pred, na.rm=T), y = max(tmp$obs, na.rm=T),
+               label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5) +
+      theme(axis.text = element_text(colour="black", size=14),
+            axis.title = element_text(colour="black", size=16),
+            plot.title = element_text(colour="black", size=10))
+    
+    model_tmp <- model_list[[motif]][[model]]$Model_trained
+    ## variance explained - average of 100 models - to get feature importance
+    df1 <- model_list[[motif]]$Data
+    df1 <- df1[,grep("log2FC_mut_swapped|motif_importance_minus_log2FC_wt_mut|Wt_motif$|motif_position|flank_|Close_", names(df1))]
+    
+    var_expl_all <- sapply(1:100, function(i){
+      df3 <- df1[,sample(ncol(df1))]
+      fit <- lm(log2FC_mut_swapped~., data=df3)
+      af <- anova(fit)
+      af$PctExp <- af$"Sum Sq"/sum(af$"Sum Sq")*100
+      var_expl <- sapply(vars, function(x) sum(af$PctExp[grep(x, rownames(af))]))
+      var_expl
+    })
+    var_expl_all <- rowMeans(var_expl_all)
+    
+    
+    tmp_avg <- data.frame(Features=names(var_expl_all),Perc=var_expl_all, stringsAsFactors = F)
+    tmp_avg$Features[grep("Dist", tmp_avg$Features)] <- "Motif distances"
+    tmp_avg$Features <- factor(tmp_avg$Features, levels=c("wt motif importance", "wt motif type", "Motif position", "Motif flanks", "Motif distances"))
+    
+    barplot_avg <- ggplot(tmp_avg, aes("Average", Perc, fill=Features)) +
+      geom_col(width=0.8) +
+      scale_fill_manual("Features", values = c("wt motif importance"="#984ea3",
+                                               "wt motif type"="#e41a1c",
+                                               "Motif position"="grey50",
+                                               "Motif flanks"="#ff7f00",
+                                               "Motif distances"="#a65628")) +
+      scale_y_continuous("Variance explained [%]", breaks=seq(-100,100,10), expand = c(0,0)) +
+      xlab("") +
+      ggtitle(paste0("adjR2: ", round(summary(model_tmp)$adj.r.squared,2))) +
+      theme(axis.text = element_text(colour="black", size=14),
+            axis.title = element_text(colour="black", size=16),
+            legend.title = element_text(colour="black", size=16),
+            legend.text = element_text(colour="black", size=14))
+    
+    print(barplot_avg + g2 +  plot_layout(widths = c(1, 6)))
+    
+    tmp_avg$Motif=motif
+    tmp_avg$Model=model
+    
+    Var_table <- rbind(Var_table, tmp_avg)
+  }
+  print(motif)
+}
+
+# average variance explained
+mean(Var_table[grep("Motif flanks", Var_table$Features),] %>% group_by(Motif, Model) %>% summarise(Perc=sum(Perc)) %>% pull(Perc)) #8.2%
+mean(Var_table[grep("Motif distances", Var_table$Features),] %>% group_by(Motif, Model) %>% summarise(Perc=sum(Perc)) %>% pull(Perc)) #8.5%
+
+```
+
+### Fig 5E - summarise importance of different features
+
+```{r summarise importance of different features}
+
+List_motif_model_results <- readRDS("List_motif_model_results_syntax_features.rds")
+
+vars <- c("motif_importance_minus_log2FC_wt_mut",
+          "Wt_motifAP-1",
+          "Wt_motifP53",
+          "Wt_motifMAF",
+          "Wt_motifCREB1",
+          "Wt_motifETS",
+          "Wt_motifEGR1",
+          "Wt_motifMECP2",
+          "Wt_motifE2F1",
+          "motif_positioncenter",
+          "motif_positionboundaries",
+          paste0("flank_left_5"),
+          paste0("flank_left_4"),
+          paste0("flank_left_3"),
+          paste0("flank_left_2"),
+          paste0("flank_left_1"),
+          paste0("flank_right_1"),
+          paste0("flank_right_2"),
+          paste0("flank_right_3"),
+          paste0("flank_right_4"),
+          paste0("flank_right_5"),
+          paste0("`Close_AP-1`", c("Close", "Distal")),
+          paste0("Close_P53", c("Close", "Distal")),
+          paste0("Close_MAF", c("Close", "Distal")),
+          paste0("Close_CREB1", c("Close", "Distal")),
+          paste0("Close_ETS", c("Close", "Distal")),
+          paste0("Close_EGR1", c("Close", "Distal")),
+          paste0("Close_MECP2", c("Close", "Distal")),
+          paste0("Close_E2F1", c("Close", "Distal"))
+)
+names(vars) <- c("wt motif importance",
+                 "wt AP-1",
+                 "wt P53",
+                 "wt MAF",
+                 "wt CREB1",
+                 "wt ETS",
+                 "wt EGR1",
+                 "wt MECP2",
+                 "wt E2F1",
+                 paste0("Motif position - ", c("Center", "Boundaries")),
+                 paste0("Flanking nt -5"),
+                 paste0("Flanking nt -4"),
+                 paste0("Flanking nt -3"),
+                 paste0("Flanking nt -2"),
+                 paste0("Flanking nt -1"),
+                 paste0("Flanking nt +1"),
+                 paste0("Flanking nt +2"),
+                 paste0("Flanking nt +3"),
+                 paste0("Flanking nt +4"),
+                 paste0("Flanking nt +5"),
+                 paste0("Dist to AP-1 - ", c("Close", "Distal")),
+                 paste0("Dist to P53 - ", c("Close", "Distal")),
+                 paste0("Dist to MAF - ", c("Close", "Distal")),
+                 paste0("Dist to CREB1 - ", c("Close", "Distal")),
+                 paste0("Dist to ETS - ", c("Close", "Distal")),
+                 paste0("Dist to EGR1 - ", c("Close", "Distal")),
+                 paste0("Dist to MECP2 - ", c("Close", "Distal")),
+                 paste0("Dist to E2F1 - ", c("Close", "Distal"))
+)
+
+motif_anno <- data.frame(row.names = names(sapply(List_motif_model_results, function(m) m$model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$adj.r.squared)),
+                         PCC = sapply(List_motif_model_results, function(m) m$model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$PCC))
+
+# Get FDR-corrected p-value bin
+summary_lm <- do.call(rbind, lapply(names(List_motif_model_results), function(model){
+  # Linear model - significance
+  out <- as.data.frame(summary(List_motif_model_results[[model]]$model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$Model_trained)$coefficients)
+  out[,"Motif"] <- model
+  out
+}))
+summary_lm$FDR <- p.adjust(summary_lm$`Pr(>|t|)`, method="fdr")
+summary_lm[grep("flank", rownames(summary_lm)),1] <- abs(summary_lm[grep("flank", rownames(summary_lm)),1]) # for flanks use only pos, because direction has no direct meaning
+
+summary_lm <- sapply(unique(summary_lm$Motif), function(model){
+  
+  # Linear model - significance
+  m <-summary_lm[summary_lm$Motif %in% model,]
+  var_imp <- sapply(vars, function(x){
+    if(length(grep(x, rownames(m)))>0){
+      m2 <- m[grep(x, rownames(m)),]
+      m2 <- m2[order(m2[,4]),]
+      p <- m2[1,6]
+      if(p>=0.1) p2 <- ">0.1"
+      if(p<0.1) p2 <- "0.1"
+      if(p<0.05) p2 <- "0.05"
+      if(p<0.01) p2 <- "0.01"
+      if(p<0.001) p2 <- "0.001"
+      
+      if(sign(m2[1,1])==1 & p<0.1) p2 <- paste0(p2, " (+)")
+      if(sign(m2[1,1])==-1 & p<0.1) p2 <- paste0(p2, " (-)")
+      return(p2)
+    }else{return(NA)}
+  })
+  
+  return(var_imp)
+  
+})
+summary_lm
+
+
+### heatmap
+# motifs in rows, features in columns
+# add PCC
+out <- reshape2::melt(summary_lm)
+out$Var2 <- factor(out$Var2, levels=rev(c("AP-1", "P53", "MAF", "CREB1", "ETS", "EGR1", "MECP2", "E2F1")))
+out$value <- factor(out$value, levels=c("0.001 (-)",
+                                        "0.01 (-)",
+                                        "0.05 (-)",
+                                        "0.1 (-)",
+                                        ">0.1",
+                                        "0.1 (+)",
+                                        "0.05 (+)",
+                                        "0.01 (+)",
+                                        "0.001 (+)"))
+g <- ggplot(out, aes(Var1, Var2, fill=value)) +
+  geom_tile(col="black") + 
+  scale_fill_manual("linear model\nFDR (direction)", values=c("0.001 (-)"="#2166AC",
+                                                              "0.01 (-)"="#4393C3",
+                                                              "0.05 (-)"="#92C5DE",
+                                                              "0.1 (-)"="#D1E5F0",
+                                                              ">0.1"="white",
+                                                              "0.1 (+)"="#FDDBC7",
+                                                              "0.05 (+)"="#F4A582",
+                                                              "0.01 (+)"="#D6604D",
+                                                              "0.001 (+)"="#B2182B"),
+                    breaks=c("0.1 (-)",
+                             "0.05 (-)",
+                             "0.01 (-)",
+                             "0.001 (-)",
+                             ">0.1",
+                             "0.1 (+)",
+                             "0.05 (+)",
+                             "0.01 (+)",
+                             "0.001 (+)"),
+                    drop=F, na.value="grey80") +
+  guides(fill=guide_legend(nrow=2,byrow=TRUE)) +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        axis.text.x = element_text(angle=90, hjust=1),
+        legend.position = "bottom")
+
+motif_anno$Var2 <- factor(rownames(motif_anno), levels=rev(c("AP-1", "P53", "MAF", "CREB1", "ETS", "EGR1", "MECP2", "E2F1")))
+
+g_PCC <- ggplot(motif_anno, aes("1", Var2, fill=PCC)) +
+  geom_tile(col="black") + 
+  scale_fill_gradient("PCC", low = "white", high = "green4", breaks = seq(0,10,0.2), limits=c(0,0.70)) +
+  theme(axis.line = element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank())
+
+print(g_PCC + g + plot_layout(widths=c(1,30)))
+
+```
+
+### Fig S22 - associations with different features
+
+```{r Plots of feature associations}
+
+List_motif_model_results <- readRDS("List_motif_model_results_syntax_features.rds")
+
+df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
+df_main <- df_main[complete.cases(df_main$log2FC_wt_mut) & df_main$log2FC_wt_mut <= -1,]
+
+myflanks <- c(paste0("-5"),
+                 paste0("-4"),
+                 paste0("-3"),
+                 paste0("-2"),
+                 paste0("-1"),
+                 paste0("+1"),
+                 paste0("+2"),
+                 paste0("+3"),
+                 paste0("+4"),
+                 paste0("+5")
+)
+names(myflanks) <- c(paste0("flank_left_5"),
+              paste0("flank_left_4"),
+              paste0("flank_left_3"),
+              paste0("flank_left_2"),
+              paste0("flank_left_1"),
+              paste0("flank_right_1"),
+              paste0("flank_right_2"),
+              paste0("flank_right_3"),
+              paste0("flank_right_4"),
+              paste0("flank_right_5")
+)
+
+for(m in names(List_motif_model_results)[c(6,7,4)]){ # some examples
+  
+  tmp <- List_motif_model_results[[m]]$Data
+  tmp$Wt_motif <- factor(tmp$Wt_motif, levels=c("AP-1", "P53", "MAF", "CREB1", "ETS", "EGR1", "MECP2", "E2F1"))
+  
+  tmp2 <- df_main[df_main$Wt_motif %in% m & complete.cases(df_main$log2FC_wt_mut),]
+  tmp2 <- tmp2[!duplicated(tmp2$Instance_ID),]
+  
+  gg <- ggplot(tmp, aes(Wt_motif, log2FC_mut_swapped, fill=Wt_motif)) +
+    geom_boxplot() +
+    scale_fill_manual("Wt motif", values=motif_colours) +
+    geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+    scale_y_continuous("log2 FC enhancer activity to shuffled mutant", breaks = seq(-10,10,2)) +
+    scale_x_discrete("wt motif", breaks=levels(tmp$Wt_motif), drop=F) +
+    ggtitle(paste0(m, " pasted (n=", nrow(tmp), " instances)")) +
+    theme(axis.text.x = element_text(size=11)) +
+    geom_boxplot(data = tmp2, aes(Wt_motif, -log2FC_wt_mut)) # to include its own instances
+  
+  print((gg + guides(fill=F)) + gg + plot_layout(widths = c(1.9,1)))
+  
+  # flanks
+  gg_flanks <- ggplot(reshape2::melt(tmp[,grep("log2FC_mut_swapped|flank",names(tmp))], id.vars="log2FC_mut_swapped"),
+         aes(variable, log2FC_mut_swapped, fill=value)) +
+    geom_boxplot(alpha=0.8, outlier.size = -1) +
+    scale_fill_manual("", values=c('#109648', '#255C99', '#F7B32B', '#D62839')) +
+    geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+    scale_y_continuous("log2 FC enhancer activity to shuffled mutant", breaks = seq(-10,10,2)) +
+    scale_x_discrete("Motif flanks", labels=myflanks) +
+    ggtitle(paste0(m, " pasted (n=", nrow(tmp), " instances)"))
+  
+  print(gg_flanks)
+  
+  # partner motifs - distance
+  for(m2 in gsub("_dist", "", grep("_dist", names(tmp), value = T))[c(1,7)]){ # some examples
+    
+    tt <- table(tmp[, paste0("Close_", m2)])
+    x_labels2 <- sapply(names(tt), function(t) paste0(t, "\n(", tt[t], ")"))
+    gg_motif_distance_summary <- ggplot(tmp, aes(tmp[,paste0("Close_", m2)], log2FC_mut_swapped, alpha=tmp[,paste0("Close_", m2)])) +
+      geom_boxplot(fill=motif_colours[m]) +
+      # scale_fill_manual("Wt motif", values=motif_colours) +
+      scale_alpha_manual(paste0(m2, " distance"), values=c(0.2, 0.5, 1)) +
+      guides(alpha=F) +
+      geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+      scale_y_continuous("log2 FC enhancer activity to shuffled mutant", breaks = seq(-10,10,2)) +
+      scale_x_discrete(paste0(m2, " distance"), breaks=names(x_labels2), labels=x_labels2) +
+      ggtitle("Summary")
+    print(gg_motif_distance_summary)
+  }
+  
+}
+
+```
+
+### Fig S20 - Random Forest model
+
+```{r Global random forest model - combining data from all motifs and features with all interactions, eval=FALSE}
+
+library(caret)
+
+# combine all data and features
+List_motif_model_results <- readRDS("List_motif_model_results_syntax_features.rds")
+All_df <- do.call(rbind, lapply(List_motif_model_results, function(m){
+  return(m$Data)
+}))
+table(All_df$Wt_motif, All_df$New_motif)
+
+# multiple models (with caret) with motif flanks, presence of other motifs, and motif flanks
+# 10-fold CV
+trctrl <- trainControl(method = "repeatedcv",
+                       number = 10,
+                       repeats = 1,
+                       classProbs = T,
+                       savePredictions = T)
+
+
+model_list <- c("rf")
+names(model_list) <- model_list
+model_predictions <- lapply(model_list, function(model){
+  model_predictions_data <- lapply(list(Only_motifs=All_df[,grep("log2FC_mut_swapped|motif_importance_minus_log2FC_wt_mut|Wt_motif$|New_motif$", names(All_df))],
+                                        All_syntax_features=All_df[,grep("log2FC_mut_swapped|motif_importance_minus_log2FC_wt_mut|Wt_motif$|New_motif$|Close_|flank_|motif_position", names(All_df))]
+  ), function(data){
+    
+    trained_model <- train(log2FC_mut_swapped ~ . , data=data, method = model,
+                             trControl=trctrl,
+                             importance = TRUE,
+                             # preProcess = c("center", "scale"),
+                             tuneLength = 1)
+    
+    feature_importance=varImp(trained_model, scale = F)$importance
+    
+    return(list(Data=data,
+                Model_trained=trained_model,
+                Pred=trained_model$pred,
+                adj.r.squared=summary(lm(trained_model$pred$pred~trained_model$pred$obs))$adj.r.squared,
+                PCC=cor.test(trained_model$pred$pred, trained_model$pred$obs)$estimate,
+                results=trained_model$results,
+                feature_importance=feature_importance))
+  })
+  return(model_predictions_data)
+})
+saveRDS(model_predictions, "List_motif_model_results_syntax_features_all_motifs.rds")
+
+```
+
+```{r plot predictions vs observations, fig.width = 18, fig.height = 6}
+
+model_predictions <- readRDS("List_motif_model_results_syntax_features_all_motifs.rds")
+
+model="rf"
+for(data in names(model_predictions[[model]])){
+  tmp <- model_predictions[[model]][[data]]$Pred
+  
+  pc <- cor.test(tmp$pred, tmp$obs,
+                 method = "pearson", use="complete.obs")
+  
+  if(length(grep("to_wt", data))>0) lab <- "log2 FC enh act to wt"
+  if(length(grep("to_wt", data))==0) lab <- "log2 FC enh act to mut"
+  
+  g2 <- ggplot(tmp, aes(pred, obs)) +
+    geom_pointdensity() +
+    scale_color_gradient(low = "grey70", high = "grey20") +
+    guides(col=F) +
+    scale_y_continuous(paste0(lab, " [observed]"), breaks = seq(-10,10,2)) +
+    scale_x_continuous(paste0(lab, " [predicted]"), breaks = seq(-10,10,2)) +
+    ggtitle(paste0(model, " - ", data, " (10-fold CV)")) +
+    geom_abline(linetype="dashed", col="grey40") +
+    annotate("text",  x=min(tmp$pred, na.rm=T), y = max(tmp$obs, na.rm=T),
+             label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5) +
+    theme(axis.text = element_text(colour="black", size=14),
+          axis.title = element_text(colour="black", size=16),
+          plot.title = element_text(colour="black", size=16))
+  
+  ## Imp features
+  imp <- model_predictions[[model]][[data]]$feature_importance
+  imp$Feature <- rownames(imp)
+  imp$Feature_type <- NA
+  imp$Feature_type[grep("motif_importance_minus_log2FC_wt_mut", imp$Feature)] <- "wt motif importance"
+  imp$Feature_type[grep("Wt_motif", imp$Feature)] <- "wt motif type"
+  imp$Feature_type[grep("New_motif", imp$Feature)] <- "New motif type"
+  imp$Feature_type[grep("flank_", imp$Feature)] <- "Motif flanks"
+  imp$Feature_type[grep("Close_", imp$Feature)] <- "Motif distances"
+  imp$Feature_type[grep("motif_position", imp$Feature)] <- "Motif position"
+  imp$Feature_type <- factor(imp$Feature_type, levels=c("wt motif importance", "wt motif type", "New motif type", "Motif position", "Motif flanks", "Motif distances"))
+  
+  imp <- imp[order(imp$Feature_type),]
+  imp$Feature <- factor(imp$Feature, levels = rev(imp$Feature))
+  barplot_all <- ggplot(imp, aes(Feature, Overall, fill=Feature_type)) +
+    geom_col(width=0.8) +
+    scale_fill_manual("Features", values = c("wt motif importance"="#984ea3",
+                                             "wt motif type"="#e41a1c",
+                                             "New motif type"="#4daf4a",
+                                             "Motif position"="grey50",
+                                             "Motif flanks"="#ff7f00",
+                                             "Motif distances"="#a65628")) +
+    scale_y_continuous("Feature importance", expand = c(0,0)) +
+    xlab("") +
+    ggtitle("") +
+    theme(axis.text = element_text(colour="black", size=14),
+          axis.text.y = element_blank(),
+          axis.title = element_text(colour="black", size=16),
+          legend.title = element_text(colour="black", size=16),
+          legend.text = element_text(colour="black", size=14)) +
+    coord_flip() +
+    guides(fill=F)
+  
+  imp <- imp[order(imp$Overall, decreasing = T),]
+  if(nrow(imp)>20) imp <- imp[1:20,]
+  imp$Feature <- factor(imp$Feature, levels = rev(imp$Feature))
+  
+  barplot_summ <- ggplot(imp, aes(Feature, Overall, fill=Feature_type)) +
+    geom_col(width=0.8) +
+    scale_fill_manual("Features", values = c("wt motif importance"="#984ea3",
+                                             "wt motif type"="#e41a1c",
+                                             "New motif type"="#4daf4a",
+                                             "Motif position"="grey50",
+                                             "Motif flanks"="#ff7f00",
+                                             "Motif distances"="#a65628")) +
+    scale_y_continuous("Feature importance", expand = c(0,0)) +
+    xlab("") +
+    ggtitle("") +
+    theme(axis.text.x = element_text(colour="black", size=14),
+          axis.text.y = element_text(colour="black", size=12),
+          axis.title = element_text(colour="black", size=16),
+          legend.title = element_text(colour="black", size=14),
+          legend.text = element_text(colour="black", size=12)) +
+    coord_flip()
+  
+  print(barplot_all + barplot_summ + g2 +  plot_layout(widths = c(1,2,3)))
+  
+}
+
+```
