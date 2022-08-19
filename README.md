@@ -1,4 +1,4 @@
-# Variant_starrseq
+# Variant STARR-seq paper
 This repository contains the code used to process all the data and reproduce the results and figures from the manuscript "Enhancers display sequence flexibility constrained by transcription factor motif syntax".
 
 For more information, see the preprint:  
