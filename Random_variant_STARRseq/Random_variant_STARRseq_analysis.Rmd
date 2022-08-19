@@ -1064,6 +1064,23 @@ write.table(Merged_enrichments, "Enrichments_and_sequence_information_all_REEF_l
 
 ```
 
+### Supplementary Table 3
+
+```{r Save Supplementary Table 3, eval=FALSE}
+
+Merged_enrichments <- read.delim("Enrichments_and_sequence_information_all_REEF_libraries.txt")
+
+### z-score normalise to just compare differences within libraries (against mean)
+df_scaled <- apply(Merged_enrichments[,grep("_act", names(Merged_enrichments), value = T)], 2, scale)
+colnames(df_scaled) <- paste0(colnames(df_scaled), "_scaled")
+
+
+out <- cbind(Merged_enrichments, df_scaled)
+
+write.table(out, "Supplementary_Table_3.txt", sep="\t", quote=F, row.names=F)
+
+```
+
 ### Fig S7C,D - pairwise comparison per position
 
 Didn't include plots because they are too heavy

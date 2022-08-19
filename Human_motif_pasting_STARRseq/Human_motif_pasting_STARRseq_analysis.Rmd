@@ -162,6 +162,7 @@ Twistmix_HCT116_20220113_oligo_info[16:ncol(Twistmix_HCT116_20220113_oligo_info)
 write.table(Twistmix_HCT116_20220113_oligo_info, paste0("Oligo_counts.txt"), sep="\t", quote=F, row.names = F)
 
 ```
+
 ## Compare replicates
 
 ### Fig S17A - Replicates scatter plots
@@ -301,9 +302,6 @@ write.table(Count_table_final, "Final_table.txt", sep="\t", quote=F, row.names =
 ## Prepare main table with motif pasting information and results
 
 ```{r Load activity of each oligo and merge with metadata, eval=FALSE}
-
-# all oligo library
-Count_table_final <- read.delim("Oligo_counts.txt", stringsAsFactors = F)
 
 ### activity of oligos
 df_twist <- read.delim("Final_table.txt", stringsAsFactors = F)[,c(1:5,10:21,23)]
@@ -846,9 +844,6 @@ heatmap_pearson <- pheatmap(dat,
 
 ```{r Variance explained by different features of the model}
 
-require(ggpointdensity)
-require(patchwork)
-
 df_main <- readRDS("REEFSTARRseq_Swap_motif_instances_sequences_final_wt_disrupted.rds")
 
 # filter for important instances
@@ -861,14 +856,6 @@ df <- df[!df$New_motif %in% "shuffle",]
 
 ### for different formulas
 df$log2FC_mut_swapped <- df$Activity-df$motif_mut_activity
-formula_list <- list(lm(log2FC_mut_swapped ~ Wt_motif, df),
-                     lm(log2FC_mut_swapped ~ New_motif, df),
-                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif, df),
-                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + New_motif, df),
-                     lm(log2FC_mut_swapped ~ Wt_motif + New_motif, df),
-                     lm(log2FC_mut_swapped ~ Wt_motif * New_motif, df),
-                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif + New_motif, df),
-                     lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif * New_motif, df))
 
 # linear model
 fit <- lm(log2FC_mut_swapped ~ log2FC_wt_mut + Wt_motif * New_motif, df)
@@ -978,6 +965,8 @@ Endogenous_sequences_motif_positions_all$Motif <- gsub("AP1", "AP-1", Endogenous
 saveRDS(Endogenous_sequences_motif_positions_all, file = "Endogenous_sequences_motif_positions_all_oligos.rds")
 
 ```
+
+### Linear model per TF motif with motif syntax features
 
 ```{r Linear model per TF motif with motif syntax features, eval=FALSE}
 
@@ -1286,13 +1275,13 @@ names(vars) <- c("wt motif importance",
                  paste0("Dist to E2F1 - ", c("Close", "Distal"))
 )
 
-motif_anno <- data.frame(row.names = names(sapply(List_motif_model_results, function(m) m$model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$adj.r.squared)),
-                         PCC = sapply(List_motif_model_results, function(m) m$model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$PCC))
+motif_anno <- data.frame(row.names = names(sapply(List_motif_model_results, function(m) m[[2]]$adj.r.squared)),
+                         PCC = sapply(List_motif_model_results, function(m) m[[2]]$PCC))
 
 # Get FDR-corrected p-value bin
 summary_lm <- do.call(rbind, lapply(names(List_motif_model_results), function(model){
   # Linear model - significance
-  out <- as.data.frame(summary(List_motif_model_results[[model]]$model_log2FC_mut_swapped_and_importance_no_number_plus_flanks$Model_trained)$coefficients)
+  out <- as.data.frame(summary(List_motif_model_results[[model]][[2]]$Model_trained)$coefficients)
   out[,"Motif"] <- model
   out
 }))
