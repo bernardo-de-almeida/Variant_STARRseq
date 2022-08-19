@@ -6,7 +6,7 @@ For more information, see the preprint:
 Franziska Reiter\*, Bernardo P. de Almeida\*, Alexander Stark. bioRxiv  
 
 The raw sequencing data are available from GEO under accession number [GSEXXX](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSEXXX).  
-The data necessary to reproduce all results and figures are available on zenodo at https://doi.org/10.5281/zenodo.XXX. Please download the respective datasets and follow the scripts below.    
+The data necessary to reproduce all results and figures are available on zenodo at https://doi.org/10.5281/zenodo.7010528. Please download the respective datasets and follow the scripts below.    
 
 ## Random variant STARRseq
 Random 8nt variants tested at seven enhancer positions in Drosophila S2 cells  
