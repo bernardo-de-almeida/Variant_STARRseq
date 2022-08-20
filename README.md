@@ -5,7 +5,7 @@ For more information, see the preprint:
 *<ins>Enhancers display sequence flexibility constrained by transcription factor motif syntax</ins>*  
 Franziska Reiter\*, Bernardo P. de Almeida\*, Alexander Stark. bioRxiv  
 
-The raw sequencing data are available from GEO under accession number [GSEXXX](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSEXXX).  
+The raw sequencing data are available from GEO under accession number [GSE211659](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE211659).  
 The data necessary to reproduce all results and figures are available on zenodo at https://doi.org/10.5281/zenodo.7010528. Please download the respective datasets and follow the scripts below.    
 
 ## Random variant STARRseq
