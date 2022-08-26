@@ -4,7 +4,7 @@ This repository contains the code used to process all the data and reproduce the
 For more information, see the manuscript:  
 *<ins>Enhancers display constrained sequence flexibility and context-specific modulation of motif function</ins>*  
 Franziska Reiter\*, Bernardo P. de Almeida\*, Alexander Stark  
-* Equal contribution.
+\* Equal contribution.
 
 The raw sequencing data are available from GEO under accession number [GSE211659](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE211659).  
 The data necessary to reproduce all results and figures are available on zenodo at https://doi.org/10.5281/zenodo.7010528. Please download the respective datasets and follow the scripts below.    
