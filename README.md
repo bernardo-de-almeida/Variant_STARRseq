@@ -1,9 +1,10 @@
 # Variant STARR-seq paper
-This repository contains the code used to process all the data and reproduce the results and figures from the manuscript "Enhancers display sequence flexibility constrained by transcription factor motif syntax".
+This repository contains the code used to process all the data and reproduce the results and figures from the manuscript "Enhancers display constrained sequence flexibility and context-specific modulation of motif function".
 
-For more information, see the preprint:  
-*<ins>Enhancers display sequence flexibility constrained by transcription factor motif syntax</ins>*  
-Franziska Reiter\*, Bernardo P. de Almeida\*, Alexander Stark. bioRxiv  
+For more information, see the manuscript:  
+*<ins>Enhancers display constrained sequence flexibility and context-specific modulation of motif function</ins>*  
+Franziska Reiter\*, Bernardo P. de Almeida\*, Alexander Stark  
+* Equal contribution.
 
 The raw sequencing data are available from GEO under accession number [GSE211659](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE211659).  
 The data necessary to reproduce all results and figures are available on zenodo at https://doi.org/10.5281/zenodo.7010528. Please download the respective datasets and follow the scripts below.    
