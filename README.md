@@ -13,7 +13,7 @@ The data necessary to reproduce all results and figures are available on zenodo 
 Random 8nt variants tested at seven enhancer positions in Drosophila S2 cells  
 		- [Pipeline for mapping sequencing reads](Random_variant_STARRseq/Read_mapping_pipeline.sh)  
 		- [R markdown to reproduce results](Random_variant_STARRseq/Random_variant_STARRseq_analysis.Rmd)  
-		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/86e8cab20aab4f7d174b20c48c677c7ec99523f5/Random_variant_STARRseq/Random_variant_STARRseq_analysis.html)  
+		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/77a09172310b16b021d5e0309619a5e934a26d21/Random_variant_STARRseq/Random_variant_STARRseq_analysis.html)  
 
 <p align="center">
 	<img src="img/Random_Variants_STARRseq_screen.png" width="700" style="margin-bottom:0;margin-top:0;"/>
@@ -23,7 +23,7 @@ Random 8nt variants tested at seven enhancer positions in Drosophila S2 cells
 Systematic pasting of Drosophila TF motifs in hundreds of enhancer positions  
 		- Sequencing reads were processed as in [here](https://github.com/bernardo-de-almeida/DeepSTARR/tree/main/Oligo_UMISTARRseq)  
 		- [R markdown to reproduce results](Drosophila_motif_pasting_STARRseq/Drosophila_motif_pasting_STARRseq_analysis.Rmd)  
-		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/86e8cab20aab4f7d174b20c48c677c7ec99523f5/Drosophila_motif_pasting_STARRseq/Drosophila_motif_pasting_STARRseq_analysis.html)  
+		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/77a09172310b16b021d5e0309619a5e934a26d21/Drosophila_motif_pasting_STARRseq/Drosophila_motif_pasting_STARRseq_analysis.html)  
 
 <p align="center">
 	<img src="img/Drosophila_motif_pasting_experiment.png" width="700" style="margin-bottom:0;margin-top:0;"/>
@@ -33,7 +33,7 @@ Systematic pasting of Drosophila TF motifs in hundreds of enhancer positions
 Systematic pasting of human TF motifs in hundreds of enhancer positions  
 		- Sequencing reads were processed as in [here](https://github.com/bernardo-de-almeida/DeepSTARR/tree/main/Oligo_UMISTARRseq)  
 		- [R markdown to reproduce results](Human_motif_pasting_STARRseq/Human_motif_pasting_STARRseq_analysis.Rmd)  
-		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/86e8cab20aab4f7d174b20c48c677c7ec99523f5/Human_motif_pasting_STARRseq/Human_motif_pasting_STARRseq_analysis.html)  
+		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/77a09172310b16b021d5e0309619a5e934a26d21/Human_motif_pasting_STARRseq/Human_motif_pasting_STARRseq_analysis.html)  
 
 <p align="center">
 	<img src="img/Human_motif_pasting_result.png" width="400" style="margin-bottom:0;margin-top:0;"/>

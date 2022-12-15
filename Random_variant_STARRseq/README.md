@@ -2,7 +2,7 @@
 Random 8nt variants tested at seven enhancer positions in Drosophila S2 cells  
 		- [Pipeline for mapping sequencing reads](Read_mapping_pipeline.sh)  
 		- [R markdown to reproduce results](Random_variant_STARRseq_analysis.Rmd)  
-		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/86e8cab20aab4f7d174b20c48c677c7ec99523f5/Random_variant_STARRseq/Random_variant_STARRseq_analysis.html)  
+		- [Results in html](https://rawcdn.githack.com/bernardo-de-almeida/Variant_STARRseq/77a09172310b16b021d5e0309619a5e934a26d21/Random_variant_STARRseq/Random_variant_STARRseq_analysis.html)  
 
 <p align="center">
 	<img src="../img/Random_Variants_STARRseq_screen.png" width="700" style="margin-bottom:0;margin-top:0;"/>
