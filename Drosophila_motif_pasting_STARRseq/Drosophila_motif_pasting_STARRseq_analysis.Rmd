@@ -1,13 +1,13 @@
 ---
 title: "Drosophila motif pasting STARR-seq analysis"
 author: "Bernardo Almeida"
-date: '2022-08-17'
+date: '2022-12-13'
 output:
   html_document:
     toc: true
     toc_float:
       collapsed: false
-    toc_depth: 4  # upto three depths of headings (specified by #, ## and ###)
+    toc_depth: 4
     theme: spacelab
     highlight: tango
 ---
@@ -16,8 +16,6 @@ output:
 
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
                       dev="CairoPNG")
-
-setwd("/groups/stark/almeida/Papers/Random_variant_motif_context_STARRseq/Code/Variant_STARRseq/Drosophila_motif_pasting_STARRseq/")
 
 ```
 
@@ -29,7 +27,7 @@ Required packages
 
 require(tidyverse)
 require(data.table)
-library(dplyr)
+require(dplyr)
 require(BSgenome.Dmelanogaster.UCSC.dm3)
 require(seqinr)
 require(stringr)
@@ -40,8 +38,8 @@ require(gridExtra)
 require(cowplot)
 require(ggrepel)
 require(Biostrings)
-
 require(ggplot2)
+theme_set(theme_classic() + theme(axis.text = element_text(colour = "black")))
 
 motif_colours <- c("wt"="orangered",
                   "CACACA"="#CCCC00",
@@ -176,17 +174,14 @@ Twistmix_20210819_oligo_info[14:ncol(Twistmix_20210819_oligo_info)][is.na(Twistm
 write.table(Twistmix_20210819_oligo_info, paste0("Oligo_counts.txt"), sep="\t", quote=F, row.names = F)
 
 ```
-## Compare replicates
 
-### Fig S10A,B - Replicates scatter plots
+## Compare STARR-seq replicates
 
-```{r Compare replicates}
+### Fig S11A,B - Replicates scatter plots
 
-library(ggpointdensity)
+```{r Compare replicates DNA and RNA}
 
 Twistmix_20210819_oligo_info <- read.delim("Oligo_counts.txt")
-
-f <- "UMI"
 
 plot_list_tmp = list()
 
@@ -197,9 +192,7 @@ Counts_per_million_cpm <- as.data.frame(apply(Oligo_counts, 2, function(x) x/sum
 
 for(id in c("input_dev_rep", "STARRseq_dev_rep")){
   if(id=="STARRseq_dev_rep") t="Dev STARR-seq"
-  if(id=="STARRseq_hk_rep") t="Hk STARR-seq"
   if(id=="input_dev_rep") t="Dev input"
-  if(id=="input_hk_rep") t="Hk input"
   
   df_tmp <- Counts_per_million_cpm[,grep(id, names(Counts_per_million_cpm))]
   
@@ -223,7 +216,8 @@ for(id in c("input_dev_rep", "STARRseq_dev_rep")){
                    log10(df_tmp[apply(df_tmp,1,min)>0,b]),
                    method = "pearson")
     
-    if(length(grep("dev", id))>0) my_col=c("orangered","orangered4") else{my_col=c("dodgerblue","dodgerblue4")}
+    if(id=="input_dev_rep") my_col=c("#d9d9d9","#525252")
+    if(id=="STARRseq_dev_rep") my_col=c("orangered","orangered4")
     
     # plot
     scater <- ggplot(df_tmp, aes(df_tmp[,a], df_tmp[,b])) +
@@ -253,7 +247,6 @@ for(id in c("input_dev_rep", "STARRseq_dev_rep")){
 
 ```
 
-
 ### Calculate expression values with DESeq2
 
 ```{r Twist oligo fold-change to input with DESeq2}
@@ -262,7 +255,7 @@ Count_table <- read.delim("Oligo_counts.txt")
 Count_table <- Count_table[,c(1:13,grep("UMI", names(Count_table)))]
 rownames(Count_table) <- Count_table$Oligo_ID
 
-library(DESeq2)
+require(DESeq2)
 
 Count_table_final <- Count_table
 
@@ -317,6 +310,117 @@ write.table(Count_table_final, "Final_table_all_oligos.txt", sep="\t", quote=F, 
 Count_table_final <- Count_table_final[complete.cases(Count_table_final$dev_log2FoldChange),]
 
 write.table(Count_table_final, "Final_table.txt", sep="\t", quote=F, row.names = F)
+
+```
+
+### Fig S11C - Compare enhancer activity between replicates
+
+```{r normalized RNA levels with DESeq2 - per library, eval = FALSE}
+
+Count_table <- read.delim("Oligo_counts.txt")
+Count_table <- Count_table[,c(1:13,grep("UMI", names(Count_table)))]
+rownames(Count_table) <- Count_table$Oligo_ID
+
+e <- "dev"
+
+DESeq_results <- lapply(c(rep1="rep1", rep2="rep2", rep3="rep3"), function(r){
+  
+  # save main table to add columns in the end
+  Count_table_final <- Count_table
+  
+  # only sequences with at least 10 reads in all inputs
+  Count_table_2 <- Count_table[rowSums(Count_table[,grep(paste0("input_", e), names(Count_table))]<10)==0,]
+  
+  cts <- Count_table_2[,grep(e, names(Count_table_2), ignore.case = T)]
+  rownames(cts) <- Count_table_2$Oligo_ID
+
+  # add one count to sequences not found in RNA
+  cts[cts==0] <- 1
+  
+  # count table replicate-specific
+  cts <- cts[,c(1:3,grep(paste0("STARRseq_dev_",r), names(cts), ignore.case = T))]
+  
+  # design
+  coldata <- data.frame(type=factor(c(rep("Input",3), rep("Experiment",1)),levels=c("Input", "Experiment")),
+                        row.names = names(cts))
+  
+  if (!identical(which(coldata$type=="Input"), grep("input", rownames(coldata)))){
+    print("Input in design matrix does not match input samples")
+    break
+  }
+  if (!all(rownames(coldata) %in% colnames(cts))){
+    print("Rownames do not match colnames")
+    break
+  }
+  if (!all(rownames(coldata) == colnames(cts))){
+    print("Rownames do not match colnames")
+    break
+  }
+  
+  dds <- DESeqDataSetFromMatrix(countData = as.matrix(cts),
+                                colData = coldata,
+                                design= ~ type)
+  
+  # use controls as sizeFactors - assumption that controls don't work
+  sizeFactors(dds)=estimateSizeFactorsForMatrix(as.matrix(cts[grep("_wt_NegativeRegions", rownames(cts)),]))
+  dds <- DESeq(dds)
+  
+  # results
+  res <- results(dds, alpha=0.05)
+  
+  # merge with main table
+  tmp <- as.data.frame(res)[,c(1,2,5,6)]
+  names(tmp) <- paste0(r,"_",names(tmp))
+  return(tmp)
+})
+
+Count_table_final <- merge(Count_table_final, DESeq_results$rep1[,c(2,4)], by.x=1, by.y=0, all.x=T)
+Count_table_final <- merge(Count_table_final, DESeq_results$rep2[,c(2,4)], by.x=1, by.y=0, all.x=T)
+Count_table_final <- merge(Count_table_final, DESeq_results$rep3[,c(2,4)], by.x=1, by.y=0, all.x=T)
+
+# save final table
+write.table(Count_table_final, "Final_table_all_oligos_and_enrichment_per_replicate.txt", sep="\t", quote = F, row.names = F)
+
+```
+
+```{r Compare replicates}
+
+Count_table_final <- read.delim("Final_table_all_oligos_and_enrichment_per_replicate.txt")
+
+plot_list_tmp = list()
+for(e in 1:3){
+  
+  if(e==1) v=c(1,2)
+  if(e==2) v=c(1,3)
+  if(e==3) v=c(2,3)
+  df_tmp <- Count_table_final[,grep("rep._log2FoldChange", names(Count_table_final))[v]]
+  
+  # PCC - not using zeros
+  pc <- cor.test(df_tmp[,1],
+                 df_tmp[,2],
+                 method = "pearson", use="pairwise.complete.obs")
+  
+  my_col=c("orangered","orangered4")
+  
+  # plot
+  scater <- ggplot(df_tmp, aes(df_tmp[,1], df_tmp[,2])) +
+    geom_pointdensity(adjust = 0.7, size=0.6) +
+    scale_color_gradient(low = my_col[1], high = my_col[2]) +
+    scale_x_continuous(paste0("Enhancer activity - rep",v[1]), breaks = seq(-10,10,2)) +
+    scale_y_continuous(paste0("Enhancer activity - rep",v[2]), breaks = seq(-10,10,2)) +
+    guides(color=F) +
+    geom_abline(linetype="dashed", col="grey30") +
+    theme_bw(base_size = 16) +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(colour="black"),
+          plot.title = element_text(hjust=0.5)) +
+    annotate("text",  x=min(df_tmp[,1], na.rm=T), y = max(df_tmp[,2], na.rm=T), label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5)
+  
+  plot_list_tmp[[e]] = ggplotGrob(scater)
+  
+}
+
+print(gridExtra::grid.arrange(grobs = plot_list_tmp, nrow = 1))
 
 ```
 
@@ -465,7 +569,7 @@ write.table(out, "Supplementary_Table_5.txt", sep="\t", quote=F, row.names=F)
 
 ## Analyse motif pasting results
 
-### Fig S10C - plot enhancer activity of different sequences
+### Fig S12A - plot enhancer activity of different sequences
 
 ```{r plot enhancer activity of different constructs}
 
@@ -501,7 +605,7 @@ print(violin)
 
 ```
 
-### Fig 3B, S12A - Activity of pasted motifs across different enhancer positions
+### Fig 3B, S14A - Activity of pasted motifs across different enhancer positions
 
 ```{r Activity of pasted motifs at different enhancer positions}
 
@@ -571,7 +675,34 @@ print(gg)
 
 ```
 
-### Fig S10D - coefficient of variations
+### Fig S12C - MA plots in function of motif-mutated activity
+
+```{r MA plots in function of motif-mutated activity}
+
+# per pasted motif
+labeller1 <- function(variable,value){
+  return(sapply(levels(df$New_motif[!df$New_motif=="shuffle"]), function(m) paste0(m, " (", round(cor.test(df$motif_mut_dev_activity[df$New_motif==m],
+                                                                                                           df$dev_activity[df$New_motif==m]-df$motif_mut_dev_activity[df$New_motif==m])$estimate,2), ")"))[value])
+}
+
+MA <- ggplot(df[!df$New_motif=="shuffle",], aes(motif_mut_dev_activity, dev_activity-motif_mut_dev_activity, colour=New_motif)) +
+  geom_point(size=0.9, alpha=0.7) +
+  scale_colour_manual(values=motif_colours) + 
+  guides(fill="none", col="none") +
+  geom_hline(yintercept = 0, linetype="dashed", col="grey40") +
+  geom_vline(xintercept = 0, linetype="dashed", col="grey40") +
+  scale_y_continuous("log2 FC enhancer activity to mutant", breaks = seq(-10,10,2)) +
+  scale_x_continuous("Mutant enhancer activity [log2]") +
+  facet_wrap(~New_motif, labeller = labeller1, nrow = 2) +
+  theme(axis.text = element_text(colour="black", size=14),
+        axis.title = element_text(colour="black", size=16),
+        strip.text = element_text(size=13))
+
+print(MA)
+
+```
+
+### Fig S12B - coefficient of variations
 
 ```{r compare coefficient of variations}
 
@@ -592,7 +723,7 @@ print(gg)
 
 ```
 
-### Fig S11A,B, 3E - pairwise comparisons between pasted motifs
+### Fig S13A,B, 3E - pairwise comparisons between pasted motifs
 
 ```{r pairwise comparisons between pasted motifs}
 
@@ -772,7 +903,7 @@ heatmap_pearson <- pheatmap(dat,
 
 ```
 
-### Fig 3C, S16B,D,F - barplots with examples of motif activity at different positions
+### Fig 3C, 4E, S19B,D,F - barplots with examples of motif activity at different positions
 
 ```{r barplots of some examples}
 
@@ -821,7 +952,7 @@ for(i in 1:length(cand)){
 
 ## Model motif pasting results based on wt motif and motif pasted
 
-### Fig S12B - Variance explained by different wildtype and pasted motif identity
+### Fig S14B - Variance explained by different wildtype and pasted motif identity
 
 ```{r Variance explained by different features of the model}
 
@@ -883,7 +1014,7 @@ print(barplot + scater +  plot_layout(widths = c(1, 5)))
 
 ## Analyses of motif contexts
 
-### Fig S13 - Compare delta between pairs of positions in same enhancer, vs pairs in diff enrhancers
+### Fig S15 - Compare delta between pairs of positions in same enhancer, vs pairs in diff enrhancers
 
 ```{r Compare delta between pairs of positions in same enhancer vs pairs in diff enrhancers}
 
@@ -1255,7 +1386,7 @@ saveRDS(model_list, "List_motif_model_results_syntax_features.rds")
 
 ```
 
-### Fig S15 - linear model performances
+### Fig S17 - linear model performances
 
 ```{r plot linear model predictions vs observations and variance explained}
 
@@ -1519,7 +1650,7 @@ print(g + g_PCC + plot_layout(widths=c(30,1)))
 
 ```
 
-### Fig 4B,C - associations with different features
+### Fig 4B, S18 - associations with different features
 
 ```{r Plots of feature associations}
 
@@ -1596,7 +1727,7 @@ for(m in names(List_motif_model_results)[c(1,4)]){ # some examples
 
 ```
 
-### Fig S14 - Random Forest model
+### Fig S16 - Random Forest model
 
 ```{r Global random forest model - combining data from all motifs and features with all interactions, eval=FALSE}
 
@@ -1745,7 +1876,7 @@ for(data in names(model_predictions[[model]])){
 
 ## DeepSTARR predictions
 
-### Fig S24
+### Fig S28
 
 ```{r Prediction of sequence activities}
 

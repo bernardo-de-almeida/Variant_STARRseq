@@ -1,7 +1,7 @@
 ---
 title: "Random variant STARR-seq analysis"
 author: "Bernardo Almeida"
-date: '2022-08-17'
+date: '2022-12-13'
 output:
   html_document:
     toc: true
@@ -16,8 +16,6 @@ output:
 
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE,
                       dev="CairoPNG")
-
-setwd("/groups/stark/almeida/Papers/Random_variant_motif_context_STARRseq/Code/Variant_STARRseq/Random_variant_STARRseq")
 
 ```
 
@@ -39,8 +37,8 @@ require(gridExtra)
 require(cowplot)
 require(ggrepel)
 require(Biostrings)
-
 require(ggplot2)
+theme_set(theme_classic() + theme(axis.text = element_text(colour = "black")))
 
 # Library colours
 # S2171 also called ced6 enhancer
@@ -226,7 +224,7 @@ for(i in c("S21717_REEFmix2_input_Rep", "S21717_REEFmix2_Rep", "chr3L_3310914_33
 
 ### Fig S1B - only ced-6 pos241 library
 
-```{r Only for S2-171 2nd GATAA instance in twist mix2 library}
+```{r Only ced-6 pos241 GATAA instance in mixed library}
 
 # Only ced-6 pos110 GATAA instance
 metadata$mean <- rowMeans(metadata[,grep("S21717_REEFmix2_input_Rep._UMI", names(metadata))])
@@ -249,10 +247,9 @@ abline(v = c(median(nr.reads.per.variant), mean(nr.reads.per.variant)), col = c(
 ```
 
 ### Fig S4A,B - Compare replicates
-
 Didn't include plots because they are too heavy
 
-```{r Compare replicates, eval = FALSE}
+```{r Compare replicates DNA and RNA, eval = FALSE}
 
 metadata <- read.delim("Table_enhancer_variant_counts.txt")
 metadata <- metadata[!metadata$library %in% "twist_S2171",] # library not used
@@ -318,7 +315,7 @@ print(gridExtra::grid.arrange(grobs = plot_list_tmp[3:4], ncol = 2))
 
 ### Fig S1A - only ced-6 pos241 library
 
-```{r Only ced-6 pos241 GATAA instance in twist mix2 library}
+```{r Only ced-6 pos241 GATAA instance in mixed libraryy}
 
 # Only ced-6 pos241 GATAA instance
 metadata <- metadata[metadata$library %in% c("ced6_pos241", "S2171_wt"),]
@@ -467,6 +464,171 @@ Count_table_final <- Count_table_final[!Count_table_final$library %in% "twist_S2
 
 # save final table
 write.table(Count_table_final, "Table_enhancer_variant_counts_and_enrichment.txt", sep="\t", quote = F, row.names = F)
+
+```
+
+### Fig S4A,B - Compare enhancer activity between replicates
+
+```{r normalized RNA levels with DESeq2 - per library and replicate, eval = FALSE}
+
+Count_table_final <- read.delim("Table_enhancer_variant_counts.txt", stringsAsFactors = F)
+rownames(Count_table_final) <- Count_table_final$Variant
+table(Count_table_final$library)
+
+require(DESeq2)
+
+# loop per screen
+DESeq_results <- lapply(c(S21717_REEFmix2="S21717_REEFmix2", chr3L_3310914_3311162_REEFmix3="chr3L_3310914_3311162_REEFmix3"), function(e){
+  tmp_list <- lapply(c(rep1="_Rep1", rep2="_Rep2"), function(r){
+    
+    if(length(grep("S21717", e))>0){
+      Count_table <- Count_table_final[!Count_table_final$Twist_mix=="mix3",c(3, grep(e, names(Count_table_final)))]
+    }
+    if(length(grep("chr3L_3310914_3311162", e))>0){
+      Count_table <- Count_table_final[!Count_table_final$Twist_mix=="mix2",c(3, grep(e, names(Count_table_final)))]
+    }
+    
+    table(Count_table$library)
+    
+    # only sequences with at least 5 reads in both inputs
+    Count_table_2 <- Count_table[rowSums(Count_table[,grep("input_", names(Count_table))]<5)==0,]
+    table(Count_table_2$library)
+    
+    # only sequences with at least 1 read in both STARR-seq reps (no need to handle zeros)
+    Count_table_2 <- Count_table_2[rowSums(Count_table_2[,grep("REEFmix._R", names(Count_table_2))]<1)==0,]
+    table(Count_table_2$library)
+    
+    # count table - all inputs + specific RNA replicate
+    cts <- Count_table_2[,c(2,3,grep(paste0(e, r), names(Count_table_2), ignore.case = T))]
+    
+    # design
+    coldata <- data.frame(type=factor(c("Input", "Input", "Experiment"),levels=c("Input", "Experiment")),
+                          row.names = names(cts))
+    
+    if (!identical(which(coldata$type=="Input"), grep("input", rownames(coldata)))){
+      print("Input in design matrix does not match input samples")
+      break
+    }
+    if (!all(rownames(coldata) %in% colnames(cts))){
+      print("Rownames do not match colnames")
+      break
+    }
+    if (!all(rownames(coldata) == colnames(cts))){
+      print("Rownames do not match colnames")
+      break
+    }
+    
+    dds <- DESeqDataSetFromMatrix(countData = as.matrix(cts),
+                                  colData = coldata,
+                                  design= ~ type)
+    
+    # use controls as sizeFactors - assumption that controls don't work
+    sizeFactors(dds)=estimateSizeFactorsForMatrix(as.matrix(cts[grep("NegativeRegions", rownames(cts)),]))
+    dds <- DESeq(dds)
+    #resultsNames(dds) # lists the coefficients
+    
+    # plots quality control
+    plotDispEsts(dds)
+    
+    # plot normal FC
+    res <- results(dds, alpha=0.05)
+    summary(res)
+    DESeq2::plotMA(res)
+    mcols(res)$description
+    
+    # merge with main table
+    tmp <- as.data.frame(res)[,c(1,2,5,6)]
+    names(tmp) <- paste0(e,r,"_",names(tmp))
+    return(tmp)
+  })
+  return(tmp_list)
+})
+
+Count_table_final <- merge(Count_table_final, DESeq_results$S21717_REEFmix2$rep1[,c(2,4)], by.x=1, by.y=0, all.x=T)
+Count_table_final <- merge(Count_table_final, DESeq_results$S21717_REEFmix2$rep2[,c(2,4)], by.x=1, by.y=0, all.x=T)
+Count_table_final <- merge(Count_table_final, DESeq_results$chr3L_3310914_3311162_REEFmix3$rep1[,c(2,4)], by.x=1, by.y=0, all.x=T)
+Count_table_final <- merge(Count_table_final, DESeq_results$chr3L_3310914_3311162_REEFmix3$rep2[,c(2,4)], by.x=1, by.y=0, all.x=T)
+
+# save final table
+write.table(Count_table_final, "Table_enhancer_variant_counts_and_enrichment_per_replicate.txt", sep="\t", quote = F, row.names = F)
+
+```
+
+```{r Compare replicates}
+
+library(ggpointdensity)
+
+metadata_final <- read.delim("Table_enhancer_variant_counts_and_enrichment_per_replicate.txt", stringsAsFactors = F)
+metadata_final <- metadata_final[!metadata_final$library %in% "twist_S2171",] # library not used
+
+plot_list_tmp = list()
+for(e in c(S21717_REEFmix2="S21717_REEFmix2", chr3L_3310914_3311162_REEFmix3="chr3L_3310914_3311162_REEFmix3")){
+  
+  df_tmp <- metadata_final[,grep(paste0(e, "_Rep._log2FoldChange"), names(metadata_final))]
+  
+  if(e=="S21717_REEFmix2") id="ced-6 enhancer"
+  if(e=="chr3L_3310914_3311162_REEFmix3") id="ZnT63C enhancer"
+  
+  # PCC - not using zeros
+  pc <- cor.test(df_tmp[,1],
+                 df_tmp[,2],
+                 method = "pearson", use="pairwise.complete.obs")
+  
+  sc_col=c("#fdd49e","#d7301f")
+  
+  # plot
+  scater <- ggplot(df_tmp, aes(df_tmp[,1], df_tmp[,2])) +
+    geom_pointdensity(adjust = 0.7, size=0.6) +
+    scale_color_gradient(low = sc_col[1], high = sc_col[2]) +
+    scale_x_continuous("Enhancer activity - rep 1") +
+    scale_y_continuous("Enhancer activity - rep 2") +
+    guides(color=F) +
+    geom_abline(linetype="dashed", col="grey30") +
+    theme_bw(base_size = 16) +
+    theme(panel.grid = element_blank(),
+          axis.text = element_text(colour="black"),
+          plot.title = element_text(hjust=0.5)) +
+    ggtitle(id) +
+    annotate("text",  x=min(df_tmp[,1], na.rm=T), y = max(df_tmp[,2], na.rm=T), label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5)
+  
+  plot_list_tmp[[e]] = ggplotGrob(scater)
+  
+}
+
+# multiplot
+print(gridExtra::grid.arrange(grobs = plot_list_tmp, ncol = 2))
+
+```
+
+### Fig S1A - Compare enhancer activity between replicates only in ced-6 pos241 library
+
+```{r Only ced-6 pos241 GATAA instance in mixed libraryyy}
+
+# Only ced-6 pos241 GATAA instance
+df_tmp <- metadata_final[metadata_final$library %in% c("ced6_pos241", "S2171_wt"),]
+
+pc <- cor.test(df_tmp$S21717_REEFmix2_Rep1_log2FoldChange,
+               df_tmp$S21717_REEFmix2_Rep2_log2FoldChange,
+               method = "pearson", use="pairwise.complete.obs")
+
+sc_col=c("#fdd49e","#d7301f")
+
+# plot
+scater <- ggplot(df_tmp, aes(S21717_REEFmix2_Rep1_log2FoldChange, S21717_REEFmix2_Rep2_log2FoldChange)) +
+  geom_pointdensity(adjust = 0.7, size=0.6) +
+  scale_color_gradient(low = sc_col[1], high = sc_col[2]) +
+  scale_x_continuous("Enhancer activity - rep 1") +
+  scale_y_continuous("Enhancer activity - rep 2") +
+  guides(color=F) +
+  geom_abline(linetype="dashed", col="grey30") +
+  theme_bw(base_size = 16) +
+  theme(panel.grid = element_blank(),
+        axis.text = element_text(colour="black"),
+        plot.title = element_text(hjust=0.5)) +
+  ggtitle(id) +
+  annotate("text",  x=min(df_tmp[,41], na.rm=T), y = max(df_tmp[,43], na.rm=T), label = paste0("PCC: ", round(pc$estimate,2)), vjust=1, hjust=0, size=5)
+
+print(scater)
 
 ```
 
@@ -631,7 +793,6 @@ print(IC_plot)
 
 ```
 
-
 ```{r Distribution of all variants - violin}
 
 boxplot <- ggplot(tmp, aes("1",y_log)) +
@@ -686,10 +847,15 @@ names(motif_interest_list) <- motif_interest_list
 # make table with enrichments per motif
 motif_variant_enrichment_16bp <- lapply(motif_interest_list, function(m){
   fw=tmp_main$S21717_REEFmix2_log2FoldChange[grep(m, tmp_main$GATAA_2nd_S2171_sequence_fw_extended4bp)]
-  if(!DNAString(m) == reverseComplement(DNAString(m))){rv=tmp_main$S21717_REEFmix2_log2FoldChange[grep(m, tmp_main$GATAA_2nd_S2171_sequence_rv_extended4bp)]}else{rv <- c()}
+  fw_seq=tmp_main$GATAA_2nd_S2171_sequence_fw_extended4bp[grep(m, tmp_main$GATAA_2nd_S2171_sequence_fw_extended4bp)]
+  if(!DNAString(m) == reverseComplement(DNAString(m))){
+    rv=tmp_main$S21717_REEFmix2_log2FoldChange[grep(m, tmp_main$GATAA_2nd_S2171_sequence_rv_extended4bp)]
+    rv_seq=tmp_main$GATAA_2nd_S2171_sequence_fw_extended4bp[grep(m, tmp_main$GATAA_2nd_S2171_sequence_rv_extended4bp)]
+    }else{rv <- c(); rv_seq <- c()}
   
   data.frame(Motif=m,
              Strand=c(rep("fw",length(fw)), rep("rv",length(rv))),
+             Sequence=c(fw_seq, rv_seq),
              Enrichment_log2=c(fw, rv))
 })
 
@@ -778,6 +944,74 @@ boxplot_known_motifs2 <- ggplot(motif_variant_enrichment, aes(Motif, Enrichment_
 print(boxplot3 + boxplot_known_motifs2 + plot_layout(widths = c(1,8)))
 print(boxplot3 + boxplot_known_motifs + plot_layout(widths = c(1,8)))
 
+# test significance of differences between orienations
+# AP1 (TGA.TCA) and Dref (ATCGAT) are palindromic and have now reverse complement
+unlist(sapply(levels(motif_variant_enrichment$Motif), function(m){
+  if(!m %in% c("TGA.TCA", "ATCGAT"))  wilcox.test(motif_variant_enrichment$Enrichment_log2[motif_variant_enrichment$Motif==m & motif_variant_enrichment$Strand=="fw"],
+                                                                  motif_variant_enrichment$Enrichment_log2[motif_variant_enrichment$Motif==m & motif_variant_enrichment$Strand=="rv"])$p.value
+  }))
+
+```
+
+### Fig S3C - Correlation between variant activity and motif scores 
+
+```{r correlation between variant activity and motif scores }
+
+TF_motifs <- list(GATA=data.frame(Motif="GATAAG", ID="flyfactorsurvey__GATAd_SANGER_5_FBgn0032223"),
+                  AP1=data.frame(Motif="TGA.TCA", ID="flyfactorsurvey__kay_Jra_SANGER_5_FBgn0001291"),
+                  twist=data.frame(Motif="CATCTG", ID="flyfactorsurvey__twi_da_SANGER_5_FBgn0000413"),
+                  Trl=data.frame(Motif="GAGAGA", ID="homer__CTYTCTYTCTCTCTC_GAGA-repeat"),
+                  ETS=data.frame(Motif="CCGGAA", ID="flyfactorsurvey__Ets97D_SANGER_10_FBgn0004510"),
+                  SREBP=data.frame(Motif="TCACGCGA", ID="flyfactorsurvey__HLH106_SANGER_10_FBgn0015234"),
+                  STAT=data.frame(Motif="TTCC.GGA", ID="stark__TTCCSGGAA"), # since bergman__Stat92E was longer than the variants sequence
+                  CREB=data.frame(Motif="TCATCA", ID="cisbp__M0295"),
+                  Dref=data.frame(Motif="ATCGAT", ID="bergman__Dref"),
+                  ttk=data.frame(Motif="AGGATAA", ID="flyfactorsurvey__ttk_NAR_FBgn0003870")
+                  )
+TF_motifs <- do.call(rbind, TF_motifs)
+
+# get motif scores
+require(motifmatchr)
+require(TFBSTools)
+load("data/TF_clusters_PWMs.RData") # load motifs
+scores <- matchMotifs(TF_clusters_PWMs$All_pwms_log_odds[name(TF_clusters_PWMs$All_pwms_log_odds) %in% TF_motifs$ID], # no ttk
+                      motif_variant_enrichment$Sequence,
+                      genome = "BSgenome.Dmelanogaster.UCSC.dm3", p.cutoff = 1, bg="genome", out = "scores") # no cutoff to get all scores
+
+out <- as.data.frame(as.matrix(motifmatchr::motifScores(scores)))
+names(out) <- name(TF_clusters_PWMs$All_pwms_log_odds[name(TF_clusters_PWMs$All_pwms_log_odds) %in% TF_motifs$ID])
+motif_variant_enrichment_2 <- cbind(motif_variant_enrichment, out)
+
+Corr_scores <- sapply(levels(motif_variant_enrichment_2$Motif), function(m){
+  cor(motif_variant_enrichment_2$Enrichment_log2[motif_variant_enrichment_2$Motif==m],
+      motif_variant_enrichment_2[motif_variant_enrichment_2$Motif==m, TF_motifs$ID[TF_motifs$Motif==m]])
+})
+
+print(Corr_scores)
+
+gg <- data.frame(Motif = factor(names(Corr_scores), levels =as.character(motif_levels$Motif)),
+           Scores = Corr_scores) %>%
+  ggplot(aes(Motif, Scores, fill=Motif)) +
+  geom_bar(stat="identity", width=0.7, col="black") +
+  scale_x_discrete("Pasted motif") +
+  scale_y_continuous("Correlation activity - motif scores", breaks = seq(-1,1,0.2)) +
+  scale_fill_manual(values=my_motif_col) +
+  guides(fill="none", col="none") +
+  scale_x_discrete("", labels=xlabels, limits=levels(motif_variant_enrichment$Motif)) +
+  theme_bw(base_size = 14) +
+  theme(axis.text = element_text(colour="black"),
+        axis.text.x = element_text(colour="black", size=9),
+        axis.title = element_text(colour="black"),
+        axis.line = element_blank(),
+        panel.border = element_rect(colour="black"),
+        panel.grid.minor = element_blank(),
+        panel.grid.major = element_line(colour="grey95", size=0.4),
+        axis.ticks = element_line(colour="black"),
+        plot.title = element_text(hjust=0.5)
+  )
+
+print(gg)
+
 ```
 
 ### Fig 1F, S3B - How many motifs explain the top variants
@@ -790,7 +1024,7 @@ rownames(top_sequences) <- top_sequences$Variant
 # 600 over WT
 
 ### All enriched motifs (FDR<0.05)
-PWM_candidates <- readRDS("data/PWM_candidates.rds") # from 20201124_REEF_S2171_and_chr3L_3310914_3311162_mixs2_3_reanalysed/Prepare_strings_from_motifs.R
+PWM_candidates <- readRDS("data/PWM_candidates.rds")
 PWM_candidates <- PWM_candidates[!PWM_candidates$X..motif_collection_name %in% "modisco",]
 PWM_candidates <- PWM_candidates[PWM_candidates$FDR_motif_enr<0.05 & PWM_candidates$log2_motif_enr>0,]
 
@@ -844,13 +1078,14 @@ TF_motifs <- list(GATA=data.frame(Motif="GATA", ID="flyfactorsurvey__srp_SANGER_
                   )
 )
 TF_motifs <- do.call(rbind, TF_motifs)
+TF_motifs$Motif <- factor(TF_motifs$Motif)
 
 Sequences_motifs_16bp <- lapply(motif_counts_all, function(p){
   
   candidates_variant_enrichment <- data.frame(sapply(levels(TF_motifs$Motif), function(m){
     return(rowSums(p[,as.character(TF_motifs$ID[TF_motifs$Motif==m])])>0)
   }))
-  candidates_variant_enrichment[,"Other motifs"] <- rowSums(p[,18:ncol(p)])>0
+  candidates_variant_enrichment[,"Other motifs"] <- rowSums(p[,17:ncol(p)])>0
   colSums(candidates_variant_enrichment)
   
   return(candidates_variant_enrichment)
@@ -1081,7 +1316,7 @@ write.table(out, "Supplementary_Table_3.txt", sep="\t", quote=F, row.names=F)
 
 ```
 
-### Fig S7C,D - pairwise comparison per position
+### Fig S8C,D - pairwise comparison per position
 
 Didn't include plots because they are too heavy
 
@@ -1215,7 +1450,7 @@ for(l in 8:5){
 
 ```
 
-```{r compare enrichments (6bp, highlight GATA and twist) - scaled, eval=FALSE}
+```{r compare enrichments (6bp, highlight GATA and twist) - scaled, eval=FALSE, width = 35, height = 25}
 
 Merged_enrichments <- read.delim("Enrichments_and_sequence_information_all_REEF_libraries.txt")
 
@@ -1301,13 +1536,11 @@ for(i in 1:(length(v)-1)){
   }
 }
 
-pdf(paste0("Compared_enrichments_per_position_different_variant_lengths_scaled_6bp_2.pdf"), width = 35, height = 25)
 print(gridExtra::grid.arrange(grobs = plot_list_motifs))
-dev.off()
 
 ```
 
-## Fig S7A,B - clustering of positions
+## Fig S8A,B - clustering of positions
 
 ```{r correlation heatmap}
 
@@ -1542,7 +1775,7 @@ saveRDS(out, "Average_motif_enrichment_log2.rds")
   
 ```
 
-## Fig S8B - plot activity of motif variants per position
+### Fig S9B - plot activity of motif variants per position
 
 ```{r plot activity of motif variants ordered - zscores}
 
@@ -1674,7 +1907,7 @@ for(lib in gsub("_sequence_fw", "", grep("sequence_fw$", names(Count_table_final
 
 ```
 
-## Fig 2E - boxplot examples
+### Fig 2E - boxplot examples
 
 ```{r Example boxplots}
 
@@ -1769,7 +2002,202 @@ pheatmap(t(tmp)[,c(4,1,2,5,6,3,7)],
 
 ```
 
-## Fig S9B - activity of variants that create repressor motifs
+## Fig S6B - How many motifs explain the top variants at important positions
+
+```{r How many motifs explain the top variants, width = 2.9, height = 3.5}
+
+Variants_res_list <- list()
+for(lib in gsub("_sequence_fw", "", grep("sequence_fw$", names(Count_table_final), value = T))[c(1,4:7)]){
+  
+  if(length(grep("ced6", lib))>0){
+    mix <- "S21717_REEFmix2"
+    wt <- "S2171_wt_+"
+    var <- "S21717_REEFmix2_log2FoldChange"
+  }else{
+    mix <- "chr3L_3310914_3311162_REEFmix3"
+    wt <- "chrX_9273894_9274142_+_dCP_-" # use reference enhancer (should have the sme activity as the wt) because I don't trust the wt levels
+    var <- "chr3L_3310914_3311162_REEFmix3_log2FoldChange"
+  }
+  
+  tmp_main <- Count_table_final[Count_table_final$library %in% c(lib, wt) | Count_table_final$Variant %in% wt,
+                                c(1:5,grep(lib, names(Count_table_final)), grep(mix, names(Count_table_final)))]
+  tmp_main$log2FoldChange <- tmp_main[,var]
+  tmp_main <- tmp_main[complete.cases(tmp_main$log2FoldChange),]
+  
+  # do the variants with high activity match to different motifs?
+  top_sequences <- tmp_main[tmp_main$log2FoldChange > tmp_main$log2FoldChange[tmp_main$library==wt | tmp_main$Variant %in% wt],]
+  rownames(top_sequences) <- top_sequences$Variant
+  
+  ### All enriched motifs (FDR<0.05)
+  PWM_candidates <- readRDS("data/PWM_candidates.rds") # from 20201124_REEF_S2171_and_chr3L_3310914_3311162_mixs2_3_reanalysed/Prepare_strings_from_motifs.R
+  PWM_candidates <- PWM_candidates[!PWM_candidates$X..motif_collection_name %in% "modisco",]
+  PWM_candidates <- PWM_candidates[PWM_candidates$FDR_motif_enr<0.05 & PWM_candidates$log2_motif_enr>0,]
+  
+  require(motifmatchr)
+  require(TFBSTools)
+  load("data/TF_clusters_PWMs.RData") # load motifs
+  
+  # count motifs in all enhancers
+  opt=list()
+  opt$pvalue_cutoff <- c(1e-4)
+  opt$genome="BSgenome.Dmelanogaster.UCSC.dm3"
+  
+  # motif counts
+  # for motif enrichment is is fine to do not reduce, because it will just be present vs non-present
+  motif_counts_all <- list()
+  for(p in opt$pvalue_cutoff){
+    # motif counts
+    motif_ix_scores <- matchMotifs(TF_clusters_PWMs$All_pwms_log_odds[name(TF_clusters_PWMs$All_pwms_log_odds) %in% PWM_candidates$motif_name],
+                                   as.character(top_sequences[[paste0(lib, "_sequence_fw_extended4bp")]]),
+                                   genome = opt$genome, p.cutoff = p, bg="genome", out = "scores")
+    scores <- as.data.frame(as.matrix(motifCounts(motif_ix_scores)))
+    names(scores) <- name(TF_clusters_PWMs$All_pwms_log_odds[name(TF_clusters_PWMs$All_pwms_log_odds) %in% PWM_candidates$motif_name])
+    motif_counts <- cbind(top_sequences, scores)
+    
+    motif_counts_all[[paste0("pvalue_", p)]] <- motif_counts
+    print(p)
+  }
+  
+  # sequences explained by main motifs, others, multiple, or none
+  TF_motifs <- list(GATA=data.frame(Motif="GATA", ID="flyfactorsurvey__srp_SANGER_5_FBgn0003507"),
+                    GATA=data.frame(Motif="GATA", ID="flyfactorsurvey__GATAd_SANGER_5_FBgn0032223"),
+                    GATA=data.frame(Motif="GATA", ID=as.character(PWM_candidates$motif_name[grep("srp|gatad", PWM_candidates$motif_description2, ignore.case = T)])),
+                    AP1=data.frame(Motif="AP-1", ID="flyfactorsurvey__kay_Jra_SANGER_5_FBgn0001291"),
+                    AP1=data.frame(Motif="AP-1", ID=as.character(PWM_candidates$motif_name[grep("jra|kay|fos|jun", PWM_candidates$motif_description2, ignore.case = T)])),
+                    twist=data.frame(Motif="twist", ID="flyfactorsurvey__twi_da_SANGER_5_FBgn0000413"),
+                    twist=data.frame(Motif="twist", ID=as.character(PWM_candidates$motif_name[grep("twi", PWM_candidates$motif_description2, ignore.case = T)])),
+                    Trl=data.frame(Motif="Trl", ID="flyfactorsurvey__Trl_FlyReg_FBgn0013263"),
+                    Trl=data.frame(Motif="Trl", ID=as.character(PWM_candidates$motif_name[grep("trl|gaga", PWM_candidates$motif_description2, ignore.case = T)])),
+                    ETS=data.frame(Motif="ETS", ID="flyfactorsurvey__Ets97D_SANGER_10_FBgn0004510"),
+                    ETS=data.frame(Motif="ETS", ID=as.character(PWM_candidates$motif_name[grep("ETS", PWM_candidates$motif_description2, ignore.case = T)])),
+                    SREBP=data.frame(Motif="SREBP", ID="flyfactorsurvey__HLH106_SANGER_10_FBgn0015234"),
+                    SREBP=data.frame(Motif="SREBP", ID=as.character(PWM_candidates$motif_name[grep("SREBP|HLH106", PWM_candidates$motif_description2, ignore.case = T)])),
+                    STAT=data.frame(Motif="STAT", ID="bergman__Stat92E"),
+                    STAT=data.frame(Motif="STAT", ID=as.character(PWM_candidates$motif_name[grep("stat", PWM_candidates$motif_description2, ignore.case = T)])),
+                    CREB=data.frame(Motif="CREB/ATF", ID="cisbp__M0295"),
+                    CREB=data.frame(Motif="CREB/ATF", ID=as.character(PWM_candidates$motif_name[grep("creb", PWM_candidates$motif_description2, ignore.case = T)])
+                    )
+  )
+  TF_motifs <- do.call(rbind, TF_motifs)
+  TF_motifs$Motif <- factor(TF_motifs$Motif)
+  
+  Sequences_motifs_16bp <- lapply(motif_counts_all, function(p){
+    
+    candidates_variant_enrichment <- data.frame(sapply(levels(TF_motifs$Motif), function(m){
+      return(rowSums(p[,as.character(TF_motifs$ID[TF_motifs$Motif==m])])>0)
+    }))
+    candidates_variant_enrichment[,"Other motifs"] <- rowSums(p[,19:ncol(p)])>0
+    colSums(candidates_variant_enrichment)
+    
+    return(candidates_variant_enrichment)
+  })
+  colSums(Sequences_motifs_16bp[[1]])
+  table(rowSums(Sequences_motifs_16bp[[1]][,1:8]))
+  
+  # save data
+  Variants_res_list[[lib]] <- Sequences_motifs_16bp[[1]] 
+  
+  # which variants
+  all_var_list <- lapply(Sequences_motifs_16bp, function(i){
+    i[,"Group"] <- apply(i, 1, function(x){
+      if(sum(x[1:8]==TRUE)>1){"Multiple"
+      }else if(sum(x[1:8]==TRUE)==1){paste0(colnames(i)[1:8][x[1:8]==TRUE], collapse = "_")
+      }else if(sum(x[1:8]==TRUE)==0 & x["Other motifs"]==TRUE){paste0(colnames(i)[x==TRUE], collapse = "_")
+      }else{"No motifs"}
+    })
+    all_var <- table(i[,"Group"])
+    names(all_var)[names(all_var)=="AP.1"] <- "AP-1"
+    names(all_var)[names(all_var)=="CREB.ATF"] <- "CREB/ATF"
+    df <- data.frame(all_var)
+    df$Var1 <- factor(df$Var1, levels=rev(c("No motifs", "Other motifs", "Multiple", rev(sort(levels(TF_motifs$Motif))))))
+    df
+  })
+  
+  gg_bar2 <- ggplot() +
+    geom_bar(data=all_var_list[[1]], aes("1e-04", Freq, fill=Var1), position="stack", stat="identity", width=0.8) +
+    xlab("PWM cutoff") +
+    scale_y_continuous("# of variants", expand = c(0,0)) +
+    ggtitle(gsub("ced6", "ced-6", gsub("_", " ", lib))) +
+    scale_fill_manual("Motifs", values=c(my_motif_col, "No motifs"="grey90", "Other motifs"="#b3cccc", Multiple="#FF9999"),
+                      limits = levels(all_var_list[[1]]$Var1)) +
+    theme(plot.title = element_text(hjust=0.5, colour=my_col[lib]))
+  
+  print(gg_bar2)
+  
+  print(lib)
+  
+}
+
+saveRDS(Variants_res_list, "Variants_motif_matching_list.rds")
+
+```
+
+## Fig S6A - edit distance of 8bp sequences in function of fold-change to WT activity
+
+```{r edit distance of variants, width = 5, height = 4}
+
+wt_motif_seq <- c("ced6_pos110"="AAGATAAT",
+                  "ced6_pos241"="CTTATCGC",
+                  "ZnT63C_pos142"="ATGACTCA",
+                  "ZnT63C_pos180"="GCAGATGT",
+                  "ZnT63C_pos210"="CTTATCTT")
+
+require(stringdist)
+for(lib in names(wt_motif_seq)){
+  
+  if(length(grep("ced6", lib))>0){
+    mix <- "S21717_REEFmix2"
+    wt <- "S2171_wt_+"
+    var <- "S21717_REEFmix2_log2FoldChange"
+  }else{
+    mix <- "chr3L_3310914_3311162_REEFmix3"
+    wt <- "chrX_9273894_9274142_+_dCP_-" # use reference enhancer (should have the sme activity as the wt) because I don't trust the wt levels
+    var <- "chr3L_3310914_3311162_REEFmix3_log2FoldChange"
+  }
+  
+  tmp_main <- Count_table_final[Count_table_final$library %in% c(lib, wt) | Count_table_final$Variant %in% wt,
+                                c(1:5,grep(lib, names(Count_table_final)), grep(mix, names(Count_table_final)))]
+  tmp_main$log2FoldChange <- tmp_main[,var]
+  tmp_main <- tmp_main[complete.cases(tmp_main$log2FoldChange),]
+  
+  # log2FC
+  tmp_main$log2FC_wt <- tmp_main$log2FoldChange-tmp_main$log2FoldChange[tmp_main$library==wt | tmp_main$Variant %in% wt]
+  
+  # edit distance - minimum of fw and rv distance
+  tmp_main$variant_seq <- tmp_main[,paste0(lib, "_sequence_fw")]
+  wt_str <- wt_motif_seq[lib]
+  wt_rev <- as.character(reverseComplement(DNAString(wt_str)))
+  tmp_main$Edit_dist_fw <- stringdist(wt_str, tmp_main$variant_seq, method="hamming")
+  tmp_main$Edit_dist_rv <- stringdist(wt_rev, tmp_main$variant_seq, method="hamming")
+  tmp_main$Edit_dist_min <- factor(apply(tmp_main[,c("Edit_dist_fw", "Edit_dist_rv")], 1, min))
+  tmp_main <- tmp_main[!(tmp_main$library==wt | tmp_main$Variant %in% wt | tmp_main$variant_seq %in% c(wt_str, wt_rev)),]
+  
+  boxplot_edit <- ggplot(tmp_main, aes(Edit_dist_min,log2FC_wt, fill=Edit_dist_min)) +
+    geom_boxplot(outlier.size = 0.8) +
+    scale_y_continuous("log2FC enhancer activity to wildtype", breaks = seq(-10,8,2), limits = c(-9.43,2.51)) +
+    scale_x_discrete("Edit distance to wildtype [hamming]") +
+    scale_fill_grey(start = 0.4) +
+    guides(fill=F) +
+    geom_hline(yintercept = 0, linetype="dashed", col="grey60") +
+    ggtitle(gsub("ced6", "ced-6", gsub("_", " ", lib))) +
+    theme_bw(base_size = 14) +
+    theme(axis.text = element_text(colour="black"),
+          axis.title = element_text(colour="black"),
+          axis.line = element_blank(),
+          panel.border = element_rect(colour="black"),
+          panel.grid.minor = element_blank(),
+          panel.grid.major = element_line(colour="grey95", size=0.4),
+          axis.ticks = element_line(colour="black"),
+          plot.title = element_text(hjust=0.5, colour=my_col[lib])
+    )
+  
+  print(boxplot_edit)
+  print(lib)
+}
+
+```
+
+## Fig S10B - activity of variants that create repressor motifs
 
 ```{r plot variants that create repressor motifs}
 
@@ -1945,7 +2373,6 @@ pheatmap(df2,
          labels_col = gsub("_", " ", gsub("ced6", "ced-6", gsub("_act", "", colnames(df2)))),
          fontsize_col=11,
          main=paste0("Scaled log2 activity of ", nrow(df2), " active variants (min 1)"),
-         # filename = "Cluster_screens_based_active_variants_heatmap.pdf", # to save plot
          width = 5.5, height = 8
          )
 
@@ -2085,7 +2512,7 @@ print(IC_plot)
 
 ### Test activity of all possible TF motifs using PWM motif matching
 
-### Fig S8A - heatmap with activity of all TF motifs
+### Fig S9A - heatmap with activity of all TF motifs
 
 ```{r heatmap all motifs - using 16bp variants, eval=FALSE}
 
@@ -2202,14 +2629,12 @@ h2 <- pheatmap(plot_df[,2:8],
          fontsize_col=9,
          fontsize = 8,
          main=paste0("Scaled log2 activity of motif variants"),
-         # filename = "Activators_motifs_activity_screens_16bp_variants_heatmap.pdf",
          width = 8, height = 8
 )
 
 ```
 
-
-### Fig S23 - DeepSTARR predictions
+### Fig S27 - DeepSTARR predictions
 
 ```{r Prepare fasta sequences, eval = FALSE}
 
